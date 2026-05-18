@@ -10,7 +10,6 @@ import (
 	"gorm.io/gorm"
 
 	"vaultfleet/internal/master/db"
-	"vaultfleet/internal/master/events"
 	"vaultfleet/pkg/protocol"
 )
 
@@ -109,6 +108,10 @@ func (h *SnapshotHandler) RefreshSnapshots(c *gin.Context) {
 			c.JSON(http.StatusGatewayTimeout, gin.H{"error": "timeout waiting for agent response"})
 			return
 		}
+		if resp.Type != protocol.TypeSnapshotListResp {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "invalid agent response"})
+			return
+		}
 		payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&resp)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "invalid agent response"})
@@ -175,25 +178,6 @@ func NewTaskResultProcessor(database *db.Database) func(agentID string, msg prot
 		}
 		return recordTaskResult(database, agentID, *result)
 	}
-}
-
-func RegisterTaskResultRecorder(bus *events.Bus, database *db.Database) {
-	if bus == nil {
-		return
-	}
-	bus.Subscribe(events.TaskResult, func(event events.Event) {
-		payload, ok := event.Payload.(map[string]interface{})
-		if !ok {
-			return
-		}
-		agentID, _ := payload["agent_id"].(string)
-		rawPayload, ok := payload["payload"].(json.RawMessage)
-		if !ok {
-			return
-		}
-		msg := protocol.Message{Type: protocol.TypeTaskResult, Payload: rawPayload}
-		_ = NewTaskResultProcessor(database)(agentID, msg)
-	})
 }
 
 func recordTaskResult(database *db.Database, agentID string, result protocol.TaskResultPayload) error {

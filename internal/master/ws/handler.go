@@ -31,20 +31,17 @@ type Handler struct {
 
 var timeNow = time.Now
 
-func NewHandler(hub *Hub, eventBus *events.Bus, authAgent AgentAuthFunc, policyLookup PolicyLookupFunc) *Handler {
+func NewHandler(hub *Hub, eventBus *events.Bus, authAgent AgentAuthFunc, policyLookup PolicyLookupFunc, taskResultProcess TaskResultProcessorFunc) *Handler {
 	return &Handler{
-		hub:          hub,
-		eventBus:     eventBus,
-		authAgent:    authAgent,
-		policyLookup: policyLookup,
+		hub:               hub,
+		eventBus:          eventBus,
+		authAgent:         authAgent,
+		policyLookup:      policyLookup,
+		taskResultProcess: taskResultProcess,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: allowAgentOrigin,
 		},
 	}
-}
-
-func (h *Handler) SetTaskResultProcessor(process TaskResultProcessorFunc) {
-	h.taskResultProcess = process
 }
 
 func allowAgentOrigin(r *http.Request) bool {

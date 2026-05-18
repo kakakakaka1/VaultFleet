@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"vaultfleet/internal/master/db"
-	"vaultfleet/internal/master/events"
 	"vaultfleet/pkg/protocol"
 )
 
@@ -98,43 +97,6 @@ func TestTaskResultProcessorRecordsHistoryAndSnapshots(t *testing.T) {
 	require.NoError(t, database.DB.First(&snapshot, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-processor").Error)
 	assert.True(t, snapshot.Timestamp.Equal(finishedAt))
 	assert.JSONEq(t, `["/srv"]`, snapshot.Paths)
-}
-
-func TestRegisterTaskResultRecorderRecordsEventBusTaskResults(t *testing.T) {
-	database, err := db.New(t.TempDir())
-	require.NoError(t, err)
-	bus := events.NewBus()
-	agent := createSnapshotTestAgent(t, database, "online")
-	finishedAt := time.Date(2026, 5, 18, 11, 0, 0, 0, time.UTC)
-	msg, err := protocol.NewMessage(protocol.TypeTaskResult, protocol.TaskResultPayload{
-		AgentID:    agent.ID,
-		TaskType:   "backup",
-		Status:     "success",
-		SnapshotID: "snap-event",
-		StartedAt:  finishedAt.Add(-time.Second),
-		FinishedAt: finishedAt,
-		Snapshots: []protocol.SnapshotInfo{
-			{ID: "snap-event", Time: finishedAt, Paths: []string{"/data"}, Size: 2048},
-		},
-	})
-	require.NoError(t, err)
-
-	RegisterTaskResultRecorder(bus, database)
-	bus.Publish(events.Event{
-		Type: events.TaskResult,
-		Payload: map[string]interface{}{
-			"agent_id": agent.ID,
-			"payload":  msg.Payload,
-		},
-	})
-
-	var history db.TaskHistory
-	require.NoError(t, database.DB.First(&history, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-event").Error)
-	assert.Equal(t, "backup", history.Type)
-
-	var snapshot db.Snapshot
-	require.NoError(t, database.DB.First(&snapshot, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-event").Error)
-	assert.Equal(t, int64(2048), snapshot.Size)
 }
 
 func TestListSnapshots(t *testing.T) {
@@ -256,6 +218,27 @@ func TestRefreshSnapshotsAgentError(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, w.Code)
 	body := parseJSON(t, w)
 	assert.Equal(t, "restic repository locked", body["error"])
+}
+
+func TestRefreshSnapshotsRejectsWrongResponseType(t *testing.T) {
+	setup := setupSnapshotAPI(t)
+	agent := createSnapshotTestAgent(t, setup.database, "online")
+	setup.hub.online[agent.ID] = true
+	setup.hub.sendAndWait = func(_ string, msg protocol.Message, _ time.Duration) (<-chan protocol.Message, error) {
+		resp, err := protocol.NewMessage(protocol.TypeDirBrowseResp, protocol.DirBrowseRespPayload{Path: "/", Entries: []protocol.DirEntry{}})
+		require.NoError(t, err)
+		resp.ID = msg.ID
+		ch := make(chan protocol.Message, 1)
+		ch <- *resp
+		close(ch)
+		return ch, nil
+	}
+
+	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/snapshots/refresh", map[string]any{})
+
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	body := parseJSON(t, w)
+	assert.Equal(t, "invalid agent response", body["error"])
 }
 
 type snapshotAPISetup struct {

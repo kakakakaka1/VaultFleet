@@ -274,6 +274,47 @@ func TestHub_HandleResponseDoesNotSatisfyWrongWaiter(t *testing.T) {
 	assert.False(t, hub.HasWaiter("agent-1", "browse-1"))
 }
 
+func TestHub_HandleResponseDoesNotSatisfyWrongResponseType(t *testing.T) {
+	hub := NewHub()
+	clientConn := addTestWebSocketAgent(t, hub, "agent-1")
+	respCh, err := hub.SendAndWait("agent-1", protocol.Message{
+		Type:    protocol.TypeSnapshotListReq,
+		ID:      "snapshots-1",
+		Payload: json.RawMessage(`{"agent_id":"agent-1"}`),
+	}, time.Second)
+	require.NoError(t, err)
+	var sent protocol.Message
+	require.NoError(t, clientConn.ReadJSON(&sent))
+
+	wrongTypeMatched := hub.HandleResponse("agent-1", protocol.Message{
+		Type:    protocol.TypeDirBrowseResp,
+		ID:      "snapshots-1",
+		Payload: json.RawMessage(`{"path":"/","entries":[]}`),
+	})
+
+	assert.False(t, wrongTypeMatched)
+	assert.True(t, hub.HasWaiter("agent-1", "snapshots-1"))
+	select {
+	case resp, ok := <-respCh:
+		t.Fatalf("wrong response type satisfied waiter: %#v ok=%v", resp, ok)
+	default:
+	}
+
+	correctResponse := protocol.Message{
+		Type:    protocol.TypeSnapshotListResp,
+		ID:      "snapshots-1",
+		Payload: json.RawMessage(`{"agent_id":"agent-1","snapshots":[]}`),
+	}
+	assert.True(t, hub.HandleResponse("agent-1", correctResponse))
+	select {
+	case got := <-respCh:
+		assert.Equal(t, correctResponse, got)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for snapshot list response")
+	}
+	assert.False(t, hub.HasWaiter("agent-1", "snapshots-1"))
+}
+
 func addTestWebSocketAgent(t *testing.T, hub *Hub, agentID string) *websocket.Conn {
 	t.Helper()
 

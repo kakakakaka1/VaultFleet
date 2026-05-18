@@ -35,7 +35,7 @@ func setupHandlerTest(t *testing.T, auth AgentAuthFunc, lookup PolicyLookupFunc)
 
 	hub := NewHub()
 	bus := events.NewBus()
-	handler := NewHandler(hub, bus, auth, lookup)
+	handler := NewHandler(hub, bus, auth, lookup, nil)
 	router := gin.New()
 	router.GET("/ws", handler.HandleWebSocket)
 
@@ -145,7 +145,7 @@ func TestHandler_HeartbeatDispatchMarksAgentOnline(t *testing.T) {
 	setup.hub.MarkOffline("agent-1")
 	require.False(t, setup.hub.IsOnline("agent-1"))
 
-	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
 	handler.dispatch("agent-1", protocol.Message{Type: protocol.TypeHeartbeat})
 
 	assert.True(t, setup.hub.IsOnline("agent-1"))
@@ -185,7 +185,7 @@ func TestHandler_PolicyAckDispatchPublishesPolicyChanged(t *testing.T) {
 	})
 
 	setup.hub.Add("agent-1", &SafeConn{})
-	setupHandler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	setupHandler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
 	setupHandler.dispatch("agent-1", protocol.Message{Type: protocol.TypePolicyAck})
 
 	select {
@@ -208,7 +208,7 @@ func TestHandler_TaskResultDispatchPublishesRawPayload(t *testing.T) {
 	})
 	rawPayload := json.RawMessage(`{"task_type":"backup","status":"success"}`)
 
-	setupHandler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	setupHandler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
 	setupHandler.dispatch("agent-1", protocol.Message{
 		Type:    protocol.TypeTaskResult,
 		Payload: rawPayload,
@@ -226,6 +226,43 @@ func TestHandler_TaskResultDispatchPublishesRawPayload(t *testing.T) {
 	}
 }
 
+func TestHandler_TaskResultProcessorFromConstructorRecordsHistoryAndSnapshots(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := db.Agent{Name: "Tokyo-1", Status: "online"}
+	require.NoError(t, database.DB.Create(&agent).Error)
+	hub := NewHub()
+	bus := events.NewBus()
+	handler := NewHandler(hub, bus, validTestAuth, noPolicy, masterapi.NewTaskResultProcessor(database))
+	finishedAt := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	msg, err := protocol.NewMessage(protocol.TypeTaskResult, protocol.TaskResultPayload{
+		AgentID:    agent.ID,
+		TaskType:   "backup",
+		Status:     "success",
+		SnapshotID: "snap-ws",
+		StartedAt:  finishedAt.Add(-time.Second),
+		FinishedAt: finishedAt,
+		Snapshots: []protocol.SnapshotInfo{
+			{ID: "snap-ws", Time: finishedAt, Paths: []string{"/srv"}, Size: 2048},
+		},
+	})
+	require.NoError(t, err)
+
+	handler.dispatch(agent.ID, *msg)
+
+	var history db.TaskHistory
+	require.NoError(t, database.DB.First(&history, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-ws").Error)
+	assert.Equal(t, "backup", history.Type)
+	assert.Equal(t, "success", history.Status)
+
+	var snapshot db.Snapshot
+	require.NoError(t, database.DB.First(&snapshot, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-ws").Error)
+	assert.True(t, snapshot.Timestamp.Equal(finishedAt))
+	assert.JSONEq(t, `["/srv"]`, snapshot.Paths)
+	assert.Equal(t, int64(2048), snapshot.Size)
+}
+
 func TestHandler_DirBrowseRespDispatchesToWaiter(t *testing.T) {
 	setup := setupHandlerTest(t, validTestAuth, noPolicy)
 	clientConn := addTestWebSocketAgent(t, setup.hub, "agent-1")
@@ -237,7 +274,7 @@ func TestHandler_DirBrowseRespDispatchesToWaiter(t *testing.T) {
 	require.NoError(t, err)
 	var sent protocol.Message
 	require.NoError(t, clientConn.ReadJSON(&sent))
-	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
 	response := protocol.Message{
 		Type:    protocol.TypeDirBrowseResp,
 		ID:      "browse-1",
@@ -265,7 +302,7 @@ func TestHandler_SnapshotListRespDispatchesToWaiter(t *testing.T) {
 	require.NoError(t, err)
 	var sent protocol.Message
 	require.NoError(t, clientConn.ReadJSON(&sent))
-	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
 	response := protocol.Message{
 		Type:    protocol.TypeSnapshotListResp,
 		ID:      "snapshots-1",
@@ -293,7 +330,7 @@ func TestHandler_OldConnectionCleanupDoesNotRemoveReplacementConnection(t *testi
 	setup.hub.Add("agent-1", oldConn)
 	setup.hub.Add("agent-1", newConn)
 
-	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
 	handler.cleanupConnection("agent-1", oldConn)
 
 	status := setup.hub.GetAllAgents()["agent-1"]
@@ -322,7 +359,7 @@ func TestHandler_CleanupAfterMonitorOfflineDoesNotPublishDuplicateOffline(t *tes
 	})
 	monitor.scan()
 
-	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
 	handler.cleanupConnection("agent-1", conn)
 
 	assert.Equal(t, []string{"agent-1"}, offlineEvents.snapshot())
@@ -335,7 +372,7 @@ func TestHandler_OnlinePublishPanicStillCleansRegistration(t *testing.T) {
 		panic("online subscriber failed")
 	})
 	hub := NewHub()
-	handler := NewHandler(hub, bus, validTestAuth, noPolicy)
+	handler := NewHandler(hub, bus, validTestAuth, noPolicy, nil)
 	router := gin.New()
 	router.GET("/ws", handler.HandleWebSocket)
 	server := httptest.NewServer(router)
@@ -460,6 +497,7 @@ func TestHandler_FullRegistrationFlow(t *testing.T) {
 			}
 			return policyMsg, true
 		},
+		nil,
 	)
 	router := gin.New()
 	router.POST("/api/agent/enroll", agentHandler.Enroll)

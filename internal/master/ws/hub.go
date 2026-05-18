@@ -23,9 +23,10 @@ type Hub struct {
 }
 
 type responseWaiter struct {
-	ch   chan protocol.Message
-	done chan struct{}
-	once sync.Once
+	ch           chan protocol.Message
+	done         chan struct{}
+	expectedType string
+	once         sync.Once
 }
 
 func NewHub() *Hub {
@@ -89,9 +90,14 @@ func (h *Hub) SendAndWait(agentID string, msg protocol.Message, timeout time.Dur
 	}
 
 	respCh := make(chan protocol.Message, 1)
+	expectedType, err := expectedResponseType(msg.Type)
+	if err != nil {
+		return nil, err
+	}
 	waiter := &responseWaiter{
-		ch:   respCh,
-		done: make(chan struct{}),
+		ch:           respCh,
+		done:         make(chan struct{}),
+		expectedType: expectedType,
 	}
 	h.mu.Lock()
 	if h.waiters[agentID] == nil {
@@ -118,6 +124,10 @@ func (h *Hub) HandleResponse(agentID string, msg protocol.Message) bool {
 		h.mu.Unlock()
 		return false
 	}
+	if waiter.expectedType != "" && msg.Type != waiter.expectedType {
+		h.mu.Unlock()
+		return false
+	}
 	delete(waitersByAgent, msg.ID)
 	if len(waitersByAgent) == 0 {
 		delete(h.waiters, agentID)
@@ -128,6 +138,17 @@ func (h *Hub) HandleResponse(agentID string, msg protocol.Message) bool {
 	waiter.ch <- msg
 	close(waiter.ch)
 	return true
+}
+
+func expectedResponseType(requestType string) (string, error) {
+	switch requestType {
+	case protocol.TypeDirBrowseReq:
+		return protocol.TypeDirBrowseResp, nil
+	case protocol.TypeSnapshotListReq:
+		return protocol.TypeSnapshotListResp, nil
+	default:
+		return "", errors.New("unsupported request type for response waiter")
+	}
 }
 
 func (h *Hub) HasWaiter(agentID string, msgID string) bool {
