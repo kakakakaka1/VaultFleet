@@ -1,0 +1,194 @@
+package executor
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type RetentionPolicy struct {
+	KeepLast    int `json:"keep_last"`
+	KeepDaily   int `json:"keep_daily"`
+	KeepWeekly  int `json:"keep_weekly"`
+	KeepMonthly int `json:"keep_monthly"`
+}
+
+type SnapshotInfo struct {
+	ID       string    `json:"id"`
+	Time     time.Time `json:"time"`
+	Paths    []string  `json:"paths"`
+	Hostname string    `json:"hostname"`
+	Size     int64     `json:"size"`
+}
+
+type ResticRunner struct {
+	RcloneConfPath string
+	PasswordFile   string
+	RepoPath       string
+}
+
+func (r ResticRunner) repoArg() string {
+	return "rclone:vaultfleet:" + r.RepoPath
+}
+
+func (r ResticRunner) baseEnv() []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "RCLONE_CONFIG=") {
+			env = append(env, entry)
+		}
+	}
+	return append(env, "RCLONE_CONFIG="+r.RcloneConfPath)
+}
+
+func (r ResticRunner) baseArgs() []string {
+	return []string{"-r", r.repoArg(), "--password-file", r.PasswordFile}
+}
+
+func (r ResticRunner) buildInitCmd() *exec.Cmd {
+	return r.buildInitCmdContext(context.Background())
+}
+
+func (r ResticRunner) buildBackupCmd(dirs []string, excludes []string) *exec.Cmd {
+	return r.buildBackupCmdContext(context.Background(), dirs, excludes)
+}
+
+func (r ResticRunner) buildForgetCmd(retention RetentionPolicy) *exec.Cmd {
+	return r.buildForgetCmdContext(context.Background(), retention)
+}
+
+func (r ResticRunner) buildSnapshotsCmd() *exec.Cmd {
+	return r.buildSnapshotsCmdContext(context.Background())
+}
+
+func (r ResticRunner) buildRestoreCmd(snapshotID, targetPath string) *exec.Cmd {
+	return r.buildRestoreCmdContext(context.Background(), snapshotID, targetPath)
+}
+
+func (r ResticRunner) buildInitCmdContext(ctx context.Context) *exec.Cmd {
+	args := append([]string{"init"}, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
+func (r ResticRunner) buildBackupCmdContext(ctx context.Context, dirs []string, excludes []string) *exec.Cmd {
+	args := append([]string{"backup"}, r.baseArgs()...)
+	for _, exclude := range excludes {
+		args = append(args, "--exclude="+exclude)
+	}
+	args = append(args, dirs...)
+	return r.command(ctx, args...)
+}
+
+func (r ResticRunner) buildForgetCmdContext(ctx context.Context, retention RetentionPolicy) *exec.Cmd {
+	args := append([]string{"forget"}, r.baseArgs()...)
+	args = append(args, "--prune")
+	if retention.KeepLast > 0 {
+		args = append(args, "--keep-last="+strconv.Itoa(retention.KeepLast))
+	}
+	if retention.KeepDaily > 0 {
+		args = append(args, "--keep-daily="+strconv.Itoa(retention.KeepDaily))
+	}
+	if retention.KeepWeekly > 0 {
+		args = append(args, "--keep-weekly="+strconv.Itoa(retention.KeepWeekly))
+	}
+	if retention.KeepMonthly > 0 {
+		args = append(args, "--keep-monthly="+strconv.Itoa(retention.KeepMonthly))
+	}
+	return r.command(ctx, args...)
+}
+
+func (r ResticRunner) buildSnapshotsCmdContext(ctx context.Context) *exec.Cmd {
+	args := []string{"snapshots", "--json"}
+	args = append(args, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
+func (r ResticRunner) buildRestoreCmdContext(ctx context.Context, snapshotID, targetPath string) *exec.Cmd {
+	args := []string{"restore", snapshotID, "--target", targetPath}
+	args = append(args, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
+func (r ResticRunner) command(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "restic", args...)
+	cmd.Env = r.baseEnv()
+	return cmd
+}
+
+func (r ResticRunner) InitRepo(ctx context.Context) error {
+	cmd := r.buildInitCmdContext(ctx)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if strings.Contains(strings.ToLower(stderr.String()), "already initialized") {
+			return nil
+		}
+		return commandError("initialize restic repository", stderr.String(), err)
+	}
+	return nil
+}
+
+func (r ResticRunner) RunBackup(ctx context.Context, dirs []string, excludes []string) (string, error) {
+	cmd := r.buildBackupCmdContext(ctx, dirs, excludes)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", commandError("run restic backup", stderr.String(), err)
+	}
+	return stdout.String(), nil
+}
+
+func (r ResticRunner) RunForget(ctx context.Context, retention RetentionPolicy) error {
+	cmd := r.buildForgetCmdContext(ctx, retention)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return commandError("run restic forget", stderr.String(), err)
+	}
+	return nil
+}
+
+func (r ResticRunner) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error) {
+	cmd := r.buildSnapshotsCmdContext(ctx)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, commandError("list restic snapshots", stderr.String(), err)
+	}
+
+	var snapshots []SnapshotInfo
+	if err := json.Unmarshal(stdout.Bytes(), &snapshots); err != nil {
+		return nil, fmt.Errorf("parse restic snapshots JSON: %w", err)
+	}
+	return snapshots, nil
+}
+
+func (r ResticRunner) RestoreSnapshot(ctx context.Context, snapshotID, targetPath string) error {
+	cmd := r.buildRestoreCmdContext(ctx, snapshotID, targetPath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return commandError("restore restic snapshot", stderr.String(), err)
+	}
+	return nil
+}
+
+func commandError(action string, stderr string, err error) error {
+	if stderr == "" {
+		return fmt.Errorf("%s: %w", action, err)
+	}
+	return fmt.Errorf("%s: %w: %s", action, err, strings.TrimSpace(stderr))
+}
