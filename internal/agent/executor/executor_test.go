@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"vaultfleet/pkg/protocol"
 )
 
 func TestNewExecutorBuildsRunnerAndCopiesConfig(t *testing.T) {
@@ -180,6 +182,70 @@ func TestTaskResultJSONOmitsEmptyOptionalFields(t *testing.T) {
 	}
 }
 
+func TestTaskResultToProtocolMarshalsProtocolShape(t *testing.T) {
+	startedAt := time.Date(2026, 5, 18, 9, 30, 0, 0, time.UTC)
+	result := TaskResult{
+		Type:       "backup",
+		Status:     "failed",
+		DurationMs: 2500,
+		ErrorLog:   "backup: permission denied",
+	}
+
+	payload := result.ToProtocol("agent-007", startedAt)
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal(protocol payload) error = %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal(protocol payload JSON) error = %v", err)
+	}
+
+	for _, key := range []string{"agent_id", "task_type", "status", "duration_ms", "error_log", "started_at", "finished_at"} {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("protocol payload JSON missing key %q: %s", key, data)
+		}
+	}
+	if _, ok := got["type"]; ok {
+		t.Fatalf("protocol payload JSON used local type key instead of task_type: %s", data)
+	}
+
+	assertProtocolResult(t, payload, protocol.TaskResultPayload{
+		AgentID:    "agent-007",
+		TaskType:   "backup",
+		Status:     "failed",
+		DurationMs: 2500,
+		ErrorLog:   "backup: permission denied",
+		StartedAt:  startedAt,
+		FinishedAt: startedAt.Add(2500 * time.Millisecond),
+	})
+}
+
+func TestTaskResultToProtocolCopiesSuccessMetadata(t *testing.T) {
+	startedAt := time.Date(2026, 5, 18, 10, 0, 0, 0, time.UTC)
+	result := TaskResult{
+		Type:       "backup",
+		Status:     "success",
+		DurationMs: 45000,
+		SnapshotID: "abc123def456",
+		RepoSize:   1073741824,
+	}
+
+	payload := result.ToProtocol("agent-002", startedAt)
+
+	assertProtocolResult(t, payload, protocol.TaskResultPayload{
+		AgentID:    "agent-002",
+		TaskType:   "backup",
+		Status:     "success",
+		SnapshotID: "abc123def456",
+		DurationMs: 45000,
+		RepoSize:   1073741824,
+		StartedAt:  startedAt,
+		FinishedAt: startedAt.Add(45000 * time.Millisecond),
+	})
+}
+
 type recordingRunner struct {
 	calls       []string
 	initErr     error
@@ -229,5 +295,36 @@ func assertRunnerCalls(t *testing.T, got, want []string) {
 		if got[i] != want[i] {
 			t.Fatalf("runner calls = %#v, want %#v", got, want)
 		}
+	}
+}
+
+func assertProtocolResult(t *testing.T, got, want protocol.TaskResultPayload) {
+	t.Helper()
+	if got.AgentID != want.AgentID {
+		t.Fatalf("AgentID = %q, want %q", got.AgentID, want.AgentID)
+	}
+	if got.TaskType != want.TaskType {
+		t.Fatalf("TaskType = %q, want %q", got.TaskType, want.TaskType)
+	}
+	if got.Status != want.Status {
+		t.Fatalf("Status = %q, want %q", got.Status, want.Status)
+	}
+	if got.SnapshotID != want.SnapshotID {
+		t.Fatalf("SnapshotID = %q, want %q", got.SnapshotID, want.SnapshotID)
+	}
+	if got.DurationMs != want.DurationMs {
+		t.Fatalf("DurationMs = %d, want %d", got.DurationMs, want.DurationMs)
+	}
+	if got.RepoSize != want.RepoSize {
+		t.Fatalf("RepoSize = %d, want %d", got.RepoSize, want.RepoSize)
+	}
+	if got.ErrorLog != want.ErrorLog {
+		t.Fatalf("ErrorLog = %q, want %q", got.ErrorLog, want.ErrorLog)
+	}
+	if !got.StartedAt.Equal(want.StartedAt) {
+		t.Fatalf("StartedAt = %s, want %s", got.StartedAt, want.StartedAt)
+	}
+	if !got.FinishedAt.Equal(want.FinishedAt) {
+		t.Fatalf("FinishedAt = %s, want %s", got.FinishedAt, want.FinishedAt)
 	}
 }

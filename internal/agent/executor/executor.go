@@ -4,6 +4,8 @@ import (
 	"context"
 	"path/filepath"
 	"time"
+
+	"vaultfleet/pkg/protocol"
 )
 
 type TaskResult struct {
@@ -14,6 +16,20 @@ type TaskResult struct {
 	RepoSize   int64          `json:"repo_size,omitempty"`
 	Snapshots  []SnapshotInfo `json:"snapshots,omitempty"`
 	ErrorLog   string         `json:"error_log,omitempty"`
+}
+
+func (r TaskResult) ToProtocol(agentID string, startedAt time.Time) protocol.TaskResultPayload {
+	return protocol.TaskResultPayload{
+		AgentID:    agentID,
+		TaskType:   r.Type,
+		Status:     r.Status,
+		SnapshotID: r.SnapshotID,
+		DurationMs: r.DurationMs,
+		RepoSize:   r.RepoSize,
+		ErrorLog:   r.ErrorLog,
+		StartedAt:  startedAt,
+		FinishedAt: startedAt.Add(time.Duration(r.DurationMs) * time.Millisecond),
+	}
 }
 
 type ExecutorConfig struct {
