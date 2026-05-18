@@ -23,28 +23,35 @@ func (h *AgentHandler) Enroll(c *gin.Context) {
 	}
 
 	var agent db.Agent
-	if err := h.DB.DB.First(&agent, "enroll_token = ?", request.EnrollToken).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "error": "invalid enrollment token"})
-			return
+	var agentToken string
+	err := withGeneratedToken("ak_", func(token string) error {
+		result := h.DB.DB.Model(&db.Agent{}).
+			Where("enroll_token = ? AND agent_token = ?", request.EnrollToken, "").
+			Select("agent_token", "enroll_token", "system_info").
+			Updates(map[string]any{
+				"agent_token":  token,
+				"enroll_token": "",
+				"system_info":  request.SystemInfo,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
 		}
 
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
-		return
-	}
-
-	if agent.AgentToken != "" {
-		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "agent already enrolled"})
-		return
-	}
-
-	agentToken := generateToken("ak_")
-	agent.AgentToken = agentToken
-	agent.EnrollToken = ""
-	agent.SystemInfo = request.SystemInfo
-
-	if err := h.DB.DB.Save(&agent).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
+		agentToken = token
+		return h.DB.DB.First(&agent, "agent_token = ?", token).Error
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			h.writeEnrollmentTokenRejected(c, request.EnrollToken)
+		case isTokenGenerationError(err):
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "token generation failed"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
+		}
 		return
 	}
 
@@ -55,4 +62,19 @@ func (h *AgentHandler) Enroll(c *gin.Context) {
 			"agent_token": agentToken,
 		},
 	})
+}
+
+func (h *AgentHandler) writeEnrollmentTokenRejected(c *gin.Context, enrollToken string) {
+	var agent db.Agent
+	err := h.DB.DB.First(&agent, "enroll_token = ?", enrollToken).Error
+	if err == nil && agent.AgentToken != "" {
+		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "agent already enrolled"})
+		return
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
+		return
+	}
+
+	c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "error": "invalid enrollment token"})
 }

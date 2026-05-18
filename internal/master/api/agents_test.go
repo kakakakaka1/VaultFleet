@@ -2,10 +2,13 @@ package api
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -78,6 +81,78 @@ func deleteJSON(t *testing.T, router http.Handler, path string) *httptest.Respon
 	return w
 }
 
+func assertNoAgentSecrets(t *testing.T, agent map[string]any) {
+	t.Helper()
+
+	assert.NotContains(t, agent, "agent_token")
+	assert.NotContains(t, agent, "enroll_token")
+}
+
+func withTokenGenerator(t *testing.T, generator func(string) (string, error)) {
+	t.Helper()
+
+	t.Cleanup(setTokenGeneratorForTest(generator))
+}
+
+func failingTokenGenerator(string) (string, error) {
+	return "", errors.New("rng failed")
+}
+
+type sequenceTokenGenerator struct {
+	mu     sync.Mutex
+	chunks [][]byte
+}
+
+func (g *sequenceTokenGenerator) generate(prefix string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if len(g.chunks) == 0 {
+		return "", errors.New("no token chunks left")
+	}
+
+	chunk := g.chunks[0]
+	g.chunks = g.chunks[1:]
+	return prefix + hex.EncodeToString(chunk), nil
+}
+
+type barrierTokenGenerator struct {
+	total   int
+	release chan struct{}
+	mu      sync.Mutex
+	count   int
+}
+
+func newBarrierTokenGenerator(total int) *barrierTokenGenerator {
+	return &barrierTokenGenerator{
+		total:   total,
+		release: make(chan struct{}),
+	}
+}
+
+func (g *barrierTokenGenerator) generate(prefix string) (string, error) {
+	g.mu.Lock()
+	g.count++
+	count := g.count
+	if count == g.total {
+		close(g.release)
+	}
+	release := g.release
+	g.mu.Unlock()
+
+	<-release
+
+	return repeatedToken(prefix, byte(count)), nil
+}
+
+func repeatedTokenBytes(value byte) []byte {
+	return bytes.Repeat([]byte{value}, 24)
+}
+
+func repeatedToken(prefix string, value byte) string {
+	return prefix + hex.EncodeToString(repeatedTokenBytes(value))
+}
+
 func TestCreateAgent(t *testing.T) {
 	setup := setupTestAgents(t)
 
@@ -108,6 +183,46 @@ func TestCreateAgent_MissingName(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestCreateAgent_TokenGenerationFailure(t *testing.T) {
+	setup := setupTestAgents(t)
+	withTokenGenerator(t, failingTokenGenerator)
+
+	var w *httptest.ResponseRecorder
+	if !assert.NotPanics(t, func() {
+		w = postJSON(t, setup.router, "/api/agents", map[string]string{"name": "Tokyo-1"})
+	}) {
+		return
+	}
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestCreateAgent_RetriesEnrollTokenCollision(t *testing.T) {
+	setup := setupTestAgents(t)
+	duplicateToken := repeatedToken("ek_", 0)
+	expectedToken := repeatedToken("ek_", 1)
+	require.NoError(t, setup.database.DB.Create(&db.Agent{
+		Name:        "Existing",
+		EnrollToken: duplicateToken,
+		Status:      "offline",
+	}).Error)
+
+	generator := &sequenceTokenGenerator{
+		chunks: [][]byte{
+			repeatedTokenBytes(0),
+			repeatedTokenBytes(1),
+		},
+	}
+	withTokenGenerator(t, generator.generate)
+
+	w := postJSON(t, setup.router, "/api/agents", map[string]string{"name": "Tokyo-1"})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := body["data"].(map[string]any)
+	assert.Equal(t, expectedToken, data["enroll_token"])
+}
+
 func TestListAgents(t *testing.T) {
 	setup := setupTestAgents(t)
 
@@ -129,7 +244,7 @@ func TestListAgents(t *testing.T) {
 		agent, ok := item.(map[string]any)
 		require.True(t, ok)
 		seen[agent["id"].(string)] = true
-		assert.NotContains(t, agent, "agent_token")
+		assertNoAgentSecrets(t, agent)
 	}
 	assert.True(t, seen[first["id"].(string)])
 	assert.True(t, seen[second["id"].(string)])
@@ -163,7 +278,7 @@ func TestGetAgent(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, id, data["id"])
 	assert.Equal(t, "Tokyo-1", data["name"])
-	assert.NotContains(t, data, "agent_token")
+	assertNoAgentSecrets(t, data)
 }
 
 func TestGetAgent_NotFound(t *testing.T) {
@@ -224,6 +339,73 @@ func TestRegenerateToken(t *testing.T) {
 	assert.Empty(t, agent.AgentToken)
 }
 
+func TestRegenerateToken_InvalidatesPreviousTokenBeforeEnrollment(t *testing.T) {
+	setup := setupTestAgents(t)
+	created := createTestAgent(t, setup.router, "Tokyo-1")
+	id := created["id"].(string)
+	oldToken := created["enroll_token"].(string)
+
+	w := postJSON(t, setup.router, "/api/agents/"+id+"/regenerate-token", map[string]string{})
+	require.Equal(t, http.StatusOK, w.Code)
+	body := parseJSON(t, w)
+	data := body["data"].(map[string]any)
+	newToken := data["enroll_token"].(string)
+
+	w = postJSON(t, setup.router, "/api/agent/enroll", map[string]string{
+		"enroll_token": oldToken,
+	})
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	w = postJSON(t, setup.router, "/api/agent/enroll", map[string]string{
+		"enroll_token": newToken,
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRegenerateToken_TokenGenerationFailure(t *testing.T) {
+	setup := setupTestAgents(t)
+	created := createTestAgent(t, setup.router, "Tokyo-1")
+	id := created["id"].(string)
+	withTokenGenerator(t, failingTokenGenerator)
+
+	var w *httptest.ResponseRecorder
+	if !assert.NotPanics(t, func() {
+		w = postJSON(t, setup.router, "/api/agents/"+id+"/regenerate-token", map[string]string{})
+	}) {
+		return
+	}
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestRegenerateToken_RetriesEnrollTokenCollision(t *testing.T) {
+	setup := setupTestAgents(t)
+	duplicateToken := repeatedToken("ek_", 0)
+	expectedToken := repeatedToken("ek_", 1)
+	require.NoError(t, setup.database.DB.Create(&db.Agent{
+		Name:        "Existing",
+		EnrollToken: duplicateToken,
+		Status:      "offline",
+	}).Error)
+	target := createTestAgent(t, setup.router, "Tokyo-1")
+	id := target["id"].(string)
+
+	generator := &sequenceTokenGenerator{
+		chunks: [][]byte{
+			repeatedTokenBytes(0),
+			repeatedTokenBytes(1),
+		},
+	}
+	withTokenGenerator(t, generator.generate)
+
+	w := postJSON(t, setup.router, "/api/agents/"+id+"/regenerate-token", map[string]string{})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := body["data"].(map[string]any)
+	assert.Equal(t, expectedToken, data["enroll_token"])
+}
+
 func TestRegenerateToken_NotFound(t *testing.T) {
 	setup := setupTestAgents(t)
 
@@ -261,6 +443,113 @@ func TestEnrollAgent(t *testing.T) {
 	assert.Empty(t, agent.EnrollToken)
 	assert.Equal(t, agentToken, agent.AgentToken)
 	assert.Equal(t, systemInfo, agent.SystemInfo)
+}
+
+func TestEnrollAgent_ConcurrentTokenUseAtomic(t *testing.T) {
+	setup := setupTestAgents(t)
+	created := createTestAgent(t, setup.router, "Tokyo-1")
+	id := created["id"].(string)
+	enrollToken := created["enroll_token"].(string)
+
+	const attempts = 8
+	withTokenGenerator(t, newBarrierTokenGenerator(attempts).generate)
+
+	payload, err := json.Marshal(map[string]string{
+		"enroll_token": enrollToken,
+		"system_info":  `{"os":"linux"}`,
+	})
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, attempts)
+	var wg sync.WaitGroup
+
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+
+			req := httptest.NewRequest(http.MethodPost, "/api/agent/enroll", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			setup.router.ServeHTTP(w, req)
+			responses <- w
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(responses)
+
+	successes := 0
+	rejections := 0
+	for w := range responses {
+		switch w.Code {
+		case http.StatusOK:
+			successes++
+		case http.StatusUnauthorized, http.StatusConflict:
+			rejections++
+		default:
+			t.Fatalf("unexpected status %d with body %s", w.Code, w.Body.String())
+		}
+	}
+
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, attempts-1, rejections)
+
+	var agent db.Agent
+	require.NoError(t, setup.database.DB.First(&agent, "id = ?", id).Error)
+	assert.Empty(t, agent.EnrollToken)
+	assert.True(t, strings.HasPrefix(agent.AgentToken, "ak_"))
+}
+
+func TestEnrollAgent_TokenGenerationFailure(t *testing.T) {
+	setup := setupTestAgents(t)
+	created := createTestAgent(t, setup.router, "Tokyo-1")
+	enrollToken := created["enroll_token"].(string)
+	withTokenGenerator(t, failingTokenGenerator)
+
+	var w *httptest.ResponseRecorder
+	if !assert.NotPanics(t, func() {
+		w = postJSON(t, setup.router, "/api/agent/enroll", map[string]string{
+			"enroll_token": enrollToken,
+		})
+	}) {
+		return
+	}
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestEnrollAgent_RetriesAgentTokenCollision(t *testing.T) {
+	setup := setupTestAgents(t)
+	duplicateToken := repeatedToken("ak_", 0)
+	expectedToken := repeatedToken("ak_", 1)
+	require.NoError(t, setup.database.DB.Create(&db.Agent{
+		Name:       "Existing",
+		AgentToken: duplicateToken,
+		Status:     "offline",
+	}).Error)
+	created := createTestAgent(t, setup.router, "Tokyo-1")
+	enrollToken := created["enroll_token"].(string)
+
+	generator := &sequenceTokenGenerator{
+		chunks: [][]byte{
+			repeatedTokenBytes(0),
+			repeatedTokenBytes(1),
+		},
+	}
+	withTokenGenerator(t, generator.generate)
+
+	w := postJSON(t, setup.router, "/api/agent/enroll", map[string]string{
+		"enroll_token": enrollToken,
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := body["data"].(map[string]any)
+	assert.Equal(t, expectedToken, data["agent_token"])
 }
 
 func TestEnrollAgent_InvalidToken(t *testing.T) {

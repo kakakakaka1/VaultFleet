@@ -28,6 +28,16 @@ var nowFunc = time.Now
 
 var sessionTTL = time.Duration(sessionMaxAge) * time.Second
 
+var tokenGenerator = generateTokenWithError
+
+func setTokenGeneratorForTest(generator func(string) (string, error)) func() {
+	previous := tokenGenerator
+	tokenGenerator = generator
+	return func() {
+		tokenGenerator = previous
+	}
+}
+
 type Session struct {
 	UserID   string
 	Username string
