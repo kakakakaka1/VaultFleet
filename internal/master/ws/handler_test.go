@@ -254,6 +254,34 @@ func TestHandler_DirBrowseRespDispatchesToWaiter(t *testing.T) {
 	}
 }
 
+func TestHandler_SnapshotListRespDispatchesToWaiter(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	clientConn := addTestWebSocketAgent(t, setup.hub, "agent-1")
+	respCh, err := setup.hub.SendAndWait("agent-1", protocol.Message{
+		Type:    protocol.TypeSnapshotListReq,
+		ID:      "snapshots-1",
+		Payload: json.RawMessage(`{"agent_id":"agent-1"}`),
+	}, time.Second)
+	require.NoError(t, err)
+	var sent protocol.Message
+	require.NoError(t, clientConn.ReadJSON(&sent))
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	response := protocol.Message{
+		Type:    protocol.TypeSnapshotListResp,
+		ID:      "snapshots-1",
+		Payload: json.RawMessage(`{"agent_id":"agent-1","snapshots":[]}`),
+	}
+
+	handler.dispatch("agent-1", response)
+
+	select {
+	case got := <-respCh:
+		assert.Equal(t, response, got)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for snapshot list response")
+	}
+}
+
 func TestHandler_OldConnectionCleanupDoesNotRemoveReplacementConnection(t *testing.T) {
 	setup := setupHandlerTest(t, validTestAuth, noPolicy)
 	offlineEvents := make(chan events.Event, 1)

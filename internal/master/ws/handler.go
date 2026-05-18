@@ -18,13 +18,15 @@ var pongWait = 60 * time.Second
 
 type AgentAuthFunc func(token string) (agentID string, err error)
 type PolicyLookupFunc func(agentID string) (*protocol.Message, bool)
+type TaskResultProcessorFunc func(agentID string, msg protocol.Message) error
 
 type Handler struct {
-	hub          *Hub
-	eventBus     *events.Bus
-	authAgent    AgentAuthFunc
-	policyLookup PolicyLookupFunc
-	upgrader     websocket.Upgrader
+	hub               *Hub
+	eventBus          *events.Bus
+	authAgent         AgentAuthFunc
+	policyLookup      PolicyLookupFunc
+	taskResultProcess TaskResultProcessorFunc
+	upgrader          websocket.Upgrader
 }
 
 var timeNow = time.Now
@@ -39,6 +41,10 @@ func NewHandler(hub *Hub, eventBus *events.Bus, authAgent AgentAuthFunc, policyL
 			CheckOrigin: allowAgentOrigin,
 		},
 	}
+}
+
+func (h *Handler) SetTaskResultProcessor(process TaskResultProcessorFunc) {
+	h.taskResultProcess = process
 }
 
 func allowAgentOrigin(r *http.Request) bool {
@@ -126,6 +132,9 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 			},
 		})
 	case protocol.TypeTaskResult:
+		if h.taskResultProcess != nil {
+			_ = h.taskResultProcess(agentID, msg)
+		}
 		h.eventBus.Publish(events.Event{
 			Type: events.TaskResult,
 			Payload: map[string]interface{}{
@@ -133,7 +142,7 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 				"payload":  msg.Payload,
 			},
 		})
-	case protocol.TypeDirBrowseResp:
+	case protocol.TypeDirBrowseResp, protocol.TypeSnapshotListResp:
 		h.hub.HandleResponse(agentID, msg)
 	}
 }

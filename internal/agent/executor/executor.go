@@ -19,6 +19,16 @@ type TaskResult struct {
 }
 
 func (r TaskResult) ToProtocol(agentID string, startedAt time.Time) protocol.TaskResultPayload {
+	snapshots := make([]protocol.SnapshotInfo, 0, len(r.Snapshots))
+	for _, snapshot := range r.Snapshots {
+		snapshots = append(snapshots, protocol.SnapshotInfo{
+			ID:    snapshot.ID,
+			Time:  snapshot.Time,
+			Paths: append([]string(nil), snapshot.Paths...),
+			Size:  snapshot.Size,
+		})
+	}
+
 	return protocol.TaskResultPayload{
 		AgentID:    agentID,
 		TaskType:   r.Type,
@@ -29,6 +39,7 @@ func (r TaskResult) ToProtocol(agentID string, startedAt time.Time) protocol.Tas
 		ErrorLog:   r.ErrorLog,
 		StartedAt:  startedAt,
 		FinishedAt: startedAt.Add(time.Duration(r.DurationMs) * time.Millisecond),
+		Snapshots:  snapshots,
 	}
 }
 

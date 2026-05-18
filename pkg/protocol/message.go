@@ -91,15 +91,16 @@ type PolicyAckPayload struct {
 
 // TaskResultPayload reports completion metadata for backup, restore, or maintenance work.
 type TaskResultPayload struct {
-	AgentID    string    `json:"agent_id"`
-	TaskType   string    `json:"task_type"`
-	Status     string    `json:"status"`
-	SnapshotID string    `json:"snapshot_id,omitempty"`
-	DurationMs int64     `json:"duration_ms"`
-	RepoSize   int64     `json:"repo_size"`
-	ErrorLog   string    `json:"error_log,omitempty"`
-	StartedAt  time.Time `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at"`
+	AgentID    string         `json:"agent_id"`
+	TaskType   string         `json:"task_type"`
+	Status     string         `json:"status"`
+	SnapshotID string         `json:"snapshot_id,omitempty"`
+	DurationMs int64          `json:"duration_ms"`
+	RepoSize   int64          `json:"repo_size"`
+	ErrorLog   string         `json:"error_log,omitempty"`
+	StartedAt  time.Time      `json:"started_at"`
+	FinishedAt time.Time      `json:"finished_at"`
+	Snapshots  []SnapshotInfo `json:"snapshots,omitempty"`
 }
 
 // RestoreProgressPayload reports incremental restore progress from an agent.

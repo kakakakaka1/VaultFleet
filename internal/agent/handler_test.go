@@ -593,6 +593,186 @@ func TestHandleBackupNowMissingPolicySendsFailureResult(t *testing.T) {
 	assert.True(t, strings.Contains(result.ErrorLog, "load policy"))
 }
 
+func TestHandleRestoreInvokesRunnerAndSendsSuccessTaskResult(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RepoPath: "repo/agent-1",
+		},
+	}))
+	sent := &sentMessages{}
+	var runnerConfig executor.ExecutorConfig
+	var runnerSnapshotID string
+	var runnerTarget string
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		RestoreRunner: func(_ context.Context, cfg executor.ExecutorConfig, snapshotID string, target string) error {
+			runnerConfig = cfg
+			runnerSnapshotID = snapshotID
+			runnerTarget = target
+			return nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
+		SnapshotID: "snap-1",
+		Target:     "/restore/target",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	assert.Equal(t, executor.ExecutorConfig{ConfigDir: configDir, RepoPath: "repo/agent-1"}, runnerConfig)
+	assert.Equal(t, "snap-1", runnerSnapshotID)
+	assert.Equal(t, "/restore/target", runnerTarget)
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	assert.Equal(t, protocol.TypeTaskResult, messages[0].Type)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", result.AgentID)
+	assert.Equal(t, "restore", result.TaskType)
+	assert.Equal(t, "success", result.Status)
+	assert.Equal(t, "snap-1", result.SnapshotID)
+	assert.Empty(t, result.ErrorLog)
+	assert.False(t, result.StartedAt.IsZero())
+	assert.False(t, result.FinishedAt.Before(result.StartedAt))
+}
+
+func TestHandleRestoreRunnerFailureSendsFailedTaskResult(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RepoPath: "repo/agent-1",
+		},
+	}))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		SendFunc:    sent.send,
+		RestoreRunner: func(context.Context, executor.ExecutorConfig, string, string) error {
+			return errors.New("restore failed")
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
+		SnapshotID: "snap-1",
+		Target:     "/restore/target",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "restore", result.TaskType)
+	assert.Equal(t, "failed", result.Status)
+	assert.Equal(t, "snap-1", result.SnapshotID)
+	assert.Contains(t, result.ErrorLog, "restore failed")
+}
+
+func TestHandleRestoreMissingPolicySendsFailedTaskResult(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		AgentID:     "agent-1",
+		SendFunc:    sent.send,
+	})
+	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
+		SnapshotID: "snap-1",
+		Target:     "/restore/target",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", result.AgentID)
+	assert.Equal(t, "restore", result.TaskType)
+	assert.Equal(t, "failed", result.Status)
+	assert.Contains(t, result.ErrorLog, "load policy")
+}
+
+func TestHandleSnapshotListInvokesRunnerAndSendsResponseWithSameID(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	snapshotTime := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RepoPath: "repo/agent-1",
+		},
+	}))
+	sent := &sentMessages{}
+	var runnerConfig executor.ExecutorConfig
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		SnapshotListRunner: func(_ context.Context, cfg executor.ExecutorConfig) ([]executor.SnapshotInfo, error) {
+			runnerConfig = cfg
+			return []executor.SnapshotInfo{
+				{ID: "snap-1", Time: snapshotTime, Paths: []string{"/etc"}, Size: 512},
+			}, nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotListReq, protocol.SnapshotListReqPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	assert.Equal(t, executor.ExecutorConfig{ConfigDir: configDir, RepoPath: "repo/agent-1"}, runnerConfig)
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	assert.Equal(t, protocol.TypeSnapshotListResp, messages[0].Type)
+	assert.Equal(t, msg.ID, messages[0].ID)
+	payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", payload.AgentID)
+	assert.Empty(t, payload.Error)
+	require.Len(t, payload.Snapshots, 1)
+	assert.Equal(t, "snap-1", payload.Snapshots[0].ID)
+	assert.True(t, payload.Snapshots[0].Time.Equal(snapshotTime))
+	assert.Equal(t, []string{"/etc"}, payload.Snapshots[0].Paths)
+	assert.Equal(t, int64(512), payload.Snapshots[0].Size)
+}
+
+func TestHandleSnapshotListMissingPolicySendsErrorPayload(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		AgentID:     "agent-1",
+		SendFunc:    sent.send,
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotListReq, protocol.SnapshotListReqPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	assert.Equal(t, protocol.TypeSnapshotListResp, messages[0].Type)
+	assert.Equal(t, msg.ID, messages[0].ID)
+	payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", payload.AgentID)
+	assert.Contains(t, payload.Error, "load policy")
+	assert.Nil(t, payload.Snapshots)
+}
+
 func TestHandlerDirBrowseReqSendsResponseWithSameID(t *testing.T) {
 	var browsedPath string
 	var browsedDepth int

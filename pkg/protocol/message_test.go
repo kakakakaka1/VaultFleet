@@ -130,6 +130,9 @@ func TestTaskResultPayload(t *testing.T) {
 		RepoSize:   1073741824,
 		StartedAt:  startedAt,
 		FinishedAt: finishedAt,
+		Snapshots: []SnapshotInfo{
+			{ID: "abc123def456", Time: finishedAt, Paths: []string{"/etc"}, Size: 4096},
+		},
 	}
 
 	_, parsed := roundTripPayload[TaskResultPayload](t, TypeTaskResult, result)
@@ -141,6 +144,11 @@ func TestTaskResultPayload(t *testing.T) {
 	assert.Equal(t, int64(1073741824), parsed.RepoSize)
 	assert.True(t, parsed.StartedAt.Equal(startedAt))
 	assert.True(t, parsed.FinishedAt.Equal(finishedAt))
+	require.Len(t, parsed.Snapshots, 1)
+	assert.Equal(t, "abc123def456", parsed.Snapshots[0].ID)
+	assert.True(t, parsed.Snapshots[0].Time.Equal(finishedAt))
+	assert.Equal(t, []string{"/etc"}, parsed.Snapshots[0].Paths)
+	assert.Equal(t, int64(4096), parsed.Snapshots[0].Size)
 }
 
 func TestDirBrowseRoundTrip(t *testing.T) {
