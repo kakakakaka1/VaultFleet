@@ -13,9 +13,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+const enrollHTTPTimeout = 30 * time.Second
 
 type AgentConfig struct {
 	Server     string `yaml:"server"`
@@ -59,7 +62,7 @@ func Enroll(serverURL, enrollToken, configPath string) (*AgentConfig, error) {
 		return nil, err
 	}
 
-	resp, err := http.Post(endpoint, "application/json", bytes.NewReader(body))
+	resp, err := enrollHTTPClient().Post(endpoint, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("enroll request: %w", err)
 	}
@@ -123,22 +126,49 @@ func collectSystemInfo() string {
 	return string(data)
 }
 
+func enrollHTTPClient() *http.Client {
+	return &http.Client{Timeout: enrollHTTPTimeout}
+}
+
 func saveConfig(cfg *AgentConfig, configPath string) error {
 	dir := filepath.Dir(configPath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := ensureConfigDir(dir); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, 0700); err != nil {
-		return err
-	}
-
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
 
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
+	return writeConfigFile(configPath, data)
+}
+
+func ensureConfigDir(dir string) error {
+	return os.MkdirAll(dir, 0700)
+}
+
+func writeConfigFile(configPath string, data []byte) error {
+	dir := filepath.Dir(configPath)
+	tempFile, err := os.CreateTemp(dir, ".agent.yaml.*")
+	if err != nil {
 		return err
 	}
-	return os.Chmod(configPath, 0600)
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+
+	if err := tempFile.Chmod(0600); err != nil {
+		_ = tempFile.Close()
+		return err
+	}
+	if _, err := tempFile.Write(data); err != nil {
+		_ = tempFile.Close()
+		return err
+	}
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, configPath); err != nil {
+		return err
+	}
+	return nil
 }

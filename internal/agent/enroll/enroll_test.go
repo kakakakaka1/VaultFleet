@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -134,6 +135,29 @@ func TestEnroll_ConfigPathPermissions(t *testing.T) {
 	assert.Equal(t, os.FileMode(0600), config.Mode().Perm())
 }
 
+func TestEnroll_DoesNotChangeExistingParentDirectoryPermissions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"data": map[string]string{
+				"agent_id":    "agent-uuid-1",
+				"agent_token": "ak_returned_token",
+			},
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	parentDir := filepath.Join(t.TempDir(), "existing-parent")
+	require.NoError(t, os.Mkdir(parentDir, 0755))
+
+	_, err := Enroll(server.URL, "ek_test123", filepath.Join(parentDir, "agent.yaml"))
+
+	require.NoError(t, err)
+	parent, err := os.Stat(parentDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0755), parent.Mode().Perm())
+}
+
 func TestEnroll_RepairsExistingConfigFilePermissions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
@@ -155,6 +179,44 @@ func TestEnroll_RepairsExistingConfigFilePermissions(t *testing.T) {
 	config, err := os.Stat(configPath)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0600), config.Mode().Perm())
+}
+
+func TestEnroll_ReplacesExistingBroadPermissionConfigFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"data": map[string]string{
+				"agent_id":    "agent-uuid-1",
+				"agent_token": "ak_returned_token",
+			},
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	parentDir := filepath.Join(t.TempDir(), "existing-parent")
+	require.NoError(t, os.Mkdir(parentDir, 0755))
+	configPath := filepath.Join(parentDir, "agent.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("old: value\n"), 0644))
+	before, err := os.Stat(configPath)
+	require.NoError(t, err)
+
+	_, err = Enroll(server.URL, "ek_test123", configPath)
+
+	require.NoError(t, err)
+	after, err := os.Stat(configPath)
+	require.NoError(t, err)
+	assert.False(t, os.SameFile(before, after), "config rewrite should replace the old broad-permission file")
+	assert.Equal(t, os.FileMode(0600), after.Mode().Perm())
+	parent, err := os.Stat(parentDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0755), parent.Mode().Perm())
+}
+
+func TestEnrollHTTPClientHasBoundedTimeout(t *testing.T) {
+	client := enrollHTTPClient()
+
+	require.NotNil(t, client)
+	assert.Greater(t, client.Timeout, time.Duration(0))
 }
 
 func TestEnroll_BadEnvelopeReturnsErrorAndDoesNotWriteConfig(t *testing.T) {
