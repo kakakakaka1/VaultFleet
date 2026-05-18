@@ -3,6 +3,7 @@ package filebrowse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -38,23 +39,40 @@ func Browse(fsRoot string, scanPath string, maxDepth int) ([]DirEntry, error) {
 		return nil, err
 	}
 
-	cleanRoot := filepath.Clean(fsRoot)
-	cleanScanPath := filepath.Clean(scanPath)
+	cleanRoot, cleanScanPath, err := resolveScanPath(fsRoot, scanPath)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := os.Lstat(cleanScanPath)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("scan path %q is a symlink, not a directory", cleanScanPath)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("scan path %q is not a directory", cleanScanPath)
+	}
+
 	baseDepth := pathDepth(cleanScanPath)
 	entries := []DirEntry{}
 
-	err := filepath.WalkDir(cleanScanPath, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(cleanScanPath, func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		cleanPath := filepath.Clean(path)
 		if walkErr != nil {
+			if cleanPath == cleanScanPath {
+				return walkErr
+			}
 			if entry != nil && entry.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		cleanPath := filepath.Clean(path)
 		if cleanPath == cleanScanPath {
 			return nil
 		}
@@ -105,6 +123,35 @@ func Browse(fsRoot string, scanPath string, maxDepth int) ([]DirEntry, error) {
 		return entries, err
 	}
 	return entries, nil
+}
+
+func resolveScanPath(fsRoot string, scanPath string) (string, string, error) {
+	cleanRoot, err := filepath.Abs(filepath.Clean(fsRoot))
+	if err != nil {
+		return "", "", err
+	}
+
+	cleanScanPath := filepath.Clean(scanPath)
+	if filepath.IsAbs(cleanScanPath) {
+		cleanScanPath, err = filepath.Abs(cleanScanPath)
+	} else {
+		cleanScanPath, err = filepath.Abs(filepath.Join(cleanRoot, cleanScanPath))
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if !isWithinRoot(cleanRoot, cleanScanPath) {
+		return "", "", fmt.Errorf("scan path %q is outside root %q", cleanScanPath, cleanRoot)
+	}
+	return cleanRoot, cleanScanPath, nil
+}
+
+func isWithinRoot(fsRoot string, path string) bool {
+	rel, err := filepath.Rel(fsRoot, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
 func isExcludedTopLevel(fsRoot string, path string) bool {

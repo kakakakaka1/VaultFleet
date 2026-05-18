@@ -63,6 +63,45 @@ func TestBrowseCompletesSmallTree(t *testing.T) {
 	assertContainsEntry(t, entries, filepath.Join(root, "etc", "nginx.conf"), EntryTypeFile)
 }
 
+func TestBrowseReturnsErrorForMissingScanRoot(t *testing.T) {
+	root := setupBrowseTree(t)
+
+	entries, err := Browse(root, filepath.Join(root, "missing"), 2)
+
+	require.Error(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestBrowseReturnsErrorForFileScanRoot(t *testing.T) {
+	root := setupBrowseTree(t)
+
+	entries, err := Browse(root, filepath.Join(root, "etc", "nginx.conf"), 2)
+
+	require.Error(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestBrowseRejectsScanPathOutsideRoot(t *testing.T) {
+	root := setupBrowseTree(t)
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "outside.txt"), []byte("outside"), 0644))
+
+	entries, err := Browse(root, outside, 2)
+
+	require.Error(t, err)
+	assert.Empty(t, entries)
+	assertNotContainsPath(t, entries, filepath.Join(outside, "outside.txt"))
+}
+
+func TestBrowseResolvesRelativeScanPathUnderRoot(t *testing.T) {
+	root := setupBrowseTree(t)
+
+	entries, err := Browse(root, "etc", 2)
+
+	require.NoError(t, err)
+	assertContainsEntry(t, entries, filepath.Join(root, "etc", "nginx.conf"), EntryTypeFile)
+}
+
 func TestBrowseTimeout(t *testing.T) {
 	root := setupBrowseTree(t)
 	originalTimeout := browseTimeout
