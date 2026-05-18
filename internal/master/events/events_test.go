@@ -45,3 +45,20 @@ func TestBus_MultipleSubscribersAllInvoked(t *testing.T) {
 
 	assert.ElementsMatch(t, []string{"first", "second"}, calls)
 }
+
+func TestBus_PanickingSubscriberDoesNotSkipLaterSubscribers(t *testing.T) {
+	bus := NewBus()
+	var called bool
+
+	bus.Subscribe(TaskResult, func(Event) {
+		panic("subscriber failed")
+	})
+	bus.Subscribe(TaskResult, func(Event) {
+		called = true
+	})
+
+	assert.NotPanics(t, func() {
+		bus.Publish(Event{Type: TaskResult, Payload: "result"})
+	})
+	assert.True(t, called)
+}

@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -82,4 +83,70 @@ func TestHub_GetAllAgentsReturnsStatusCopy(t *testing.T) {
 
 	assert.True(t, hub.IsOnline("agent-1"))
 	assert.Contains(t, hub.GetAllAgents(), "agent-1")
+}
+
+func TestHub_AddReplacesAndClosesPreviousConnection(t *testing.T) {
+	hub := NewHub()
+	oldConn := &SafeConn{}
+	newConn := &SafeConn{}
+
+	hub.Add("agent-1", oldConn)
+	hub.Add("agent-1", newConn)
+
+	assert.ErrorIs(t, oldConn.WriteJSON(map[string]string{"type": "heartbeat"}), ErrNilConn)
+	status := hub.GetAllAgents()["agent-1"]
+	require.NotNil(t, status)
+	assert.Same(t, newConn, status.Conn)
+	assert.True(t, hub.IsOnline("agent-1"))
+}
+
+func TestHub_RemoveIfCurrentDoesNotRemoveReplacementConnection(t *testing.T) {
+	hub := NewHub()
+	oldConn := &SafeConn{}
+	newConn := &SafeConn{}
+
+	hub.Add("agent-1", oldConn)
+	hub.Add("agent-1", newConn)
+	hub.RemoveIfCurrent("agent-1", oldConn)
+
+	status := hub.GetAllAgents()["agent-1"]
+	require.NotNil(t, status)
+	assert.Same(t, newConn, status.Conn)
+	assert.True(t, hub.IsOnline("agent-1"))
+
+	hub.RemoveIfCurrent("agent-1", newConn)
+
+	assert.False(t, hub.IsOnline("agent-1"))
+	assert.NotContains(t, hub.GetAllAgents(), "agent-1")
+}
+
+func TestHub_SendConcurrentWithRemoveIsRaceFree(t *testing.T) {
+	hub := NewHub()
+	hub.Add("agent-1", &SafeConn{})
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 100; j++ {
+				_ = hub.Send("agent-1", map[string]string{"type": "heartbeat"})
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for j := 0; j < 100; j++ {
+			hub.Remove("agent-1")
+			hub.Add("agent-1", &SafeConn{})
+		}
+	}()
+
+	close(start)
+	wg.Wait()
 }

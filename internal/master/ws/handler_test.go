@@ -161,7 +161,7 @@ func TestHandler_PolicyAckDispatchPublishesPolicyChanged(t *testing.T) {
 func TestHandler_TaskResultDispatchPublishesRawPayload(t *testing.T) {
 	setup := setupHandlerTest(t, validTestAuth, noPolicy)
 	eventsCh := make(chan events.Event, 1)
-	setup.bus.Subscribe(events.EventType(protocol.TypeTaskResult), func(event events.Event) {
+	setup.bus.Subscribe(events.TaskResult, func(event events.Event) {
 		eventsCh <- event
 	})
 	rawPayload := json.RawMessage(`{"task_type":"backup","status":"success"}`)
@@ -174,7 +174,7 @@ func TestHandler_TaskResultDispatchPublishesRawPayload(t *testing.T) {
 
 	select {
 	case event := <-eventsCh:
-		assert.Equal(t, events.EventType(protocol.TypeTaskResult), event.Type)
+		assert.Equal(t, events.TaskResult, event.Type)
 		payload, ok := event.Payload.(map[string]interface{})
 		require.True(t, ok)
 		assert.Equal(t, "agent-1", payload["agent_id"])
@@ -182,6 +182,94 @@ func TestHandler_TaskResultDispatchPublishesRawPayload(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for task result event")
 	}
+}
+
+func TestHandler_OldConnectionCleanupDoesNotRemoveReplacementConnection(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	offlineEvents := make(chan events.Event, 1)
+	setup.bus.Subscribe(events.AgentOffline, func(event events.Event) {
+		offlineEvents <- event
+	})
+	oldConn := &SafeConn{}
+	newConn := &SafeConn{}
+	setup.hub.Add("agent-1", oldConn)
+	setup.hub.Add("agent-1", newConn)
+
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	handler.cleanupConnection("agent-1", oldConn)
+
+	status := setup.hub.GetAllAgents()["agent-1"]
+	require.NotNil(t, status)
+	assert.Same(t, newConn, status.Conn)
+	assert.True(t, setup.hub.IsOnline("agent-1"))
+
+	select {
+	case event := <-offlineEvents:
+		t.Fatalf("unexpected offline event for replacement connection: %#v", event)
+	default:
+	}
+}
+
+func TestHandler_OnlinePublishPanicStillCleansRegistration(t *testing.T) {
+	bus := events.NewBus()
+	bus.Subscribe(events.AgentOnline, func(events.Event) {
+		panic("online subscriber failed")
+	})
+	hub := NewHub()
+	handler := NewHandler(hub, bus, validTestAuth, noPolicy)
+	router := gin.New()
+	router.GET("/ws", handler.HandleWebSocket)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial(websocketURL(server.URL, "/ws", url.Values{"token": []string{"valid-token"}}), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.Eventually(t, func() bool {
+		return hub.IsOnline("agent-1")
+	}, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, conn.Close())
+	require.Eventually(t, func() bool {
+		return !hub.IsOnline("agent-1")
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestHandler_RejectsCrossOriginWebSocket(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	server := httptest.NewServer(setup.router)
+	t.Cleanup(server.Close)
+
+	header := http.Header{}
+	header.Set("Origin", "http://evil.example")
+	conn, resp, err := websocket.DefaultDialer.Dial(websocketURL(server.URL, "/ws", url.Values{"token": []string{"valid-token"}}), header)
+	if conn != nil {
+		conn.Close()
+	}
+
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandler_AllowsEmptyOriginAndSameOrigin(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	server := httptest.NewServer(setup.router)
+	t.Cleanup(server.Close)
+	wsURL := websocketURL(server.URL, "/ws", url.Values{"token": []string{"valid-token"}})
+
+	emptyOriginConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	require.NoError(t, emptyOriginConn.Close())
+
+	originURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	header := http.Header{}
+	header.Set("Origin", originURL.Scheme+"://"+originURL.Host)
+	sameOriginConn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	require.NoError(t, err)
+	require.NoError(t, sameOriginConn.Close())
 }
 
 func TestHandler_PolicyPushedOnConnect(t *testing.T) {

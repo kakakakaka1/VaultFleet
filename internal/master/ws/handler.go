@@ -2,6 +2,7 @@ package ws
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -9,6 +10,11 @@ import (
 
 	"vaultfleet/internal/master/events"
 	"vaultfleet/pkg/protocol"
+)
+
+const (
+	maxMessageBytes = 1 << 20
+	pongWait        = 60 * time.Second
 )
 
 type AgentAuthFunc func(token string) (agentID string, err error)
@@ -31,11 +37,22 @@ func NewHandler(hub *Hub, eventBus *events.Bus, authAgent AgentAuthFunc, policyL
 		authAgent:    authAgent,
 		policyLookup: policyLookup,
 		upgrader: websocket.Upgrader{
-			CheckOrigin: func(*http.Request) bool {
-				return true
-			},
+			CheckOrigin: allowAgentOrigin,
 		},
 	}
+}
+
+func allowAgentOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	originURL, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return originURL.Host == r.Host
 }
 
 func (h *Handler) HandleWebSocket(c *gin.Context) {
@@ -58,11 +75,8 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 
 	safeConn := NewSafeConn(conn)
 	h.hub.Add(agentID, safeConn)
+	defer h.cleanupConnection(agentID, safeConn)
 	h.eventBus.Publish(events.Event{Type: events.AgentOnline, Payload: agentID})
-	defer func() {
-		h.hub.Remove(agentID)
-		h.eventBus.Publish(events.Event{Type: events.AgentOffline, Payload: agentID})
-	}()
 
 	if h.policyLookup != nil {
 		if msg, ok := h.policyLookup(agentID); ok && msg != nil {
@@ -75,7 +89,19 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 	h.readLoop(agentID, safeConn)
 }
 
+func (h *Handler) cleanupConnection(agentID string, conn *SafeConn) {
+	if h.hub.RemoveIfCurrent(agentID, conn) {
+		h.eventBus.Publish(events.Event{Type: events.AgentOffline, Payload: agentID})
+	}
+}
+
 func (h *Handler) readLoop(agentID string, conn *SafeConn) {
+	conn.SetReadLimit(maxMessageBytes)
+	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+
 	for {
 		var msg protocol.Message
 		if err := conn.ReadJSON(&msg); err != nil {
@@ -99,7 +125,7 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 		})
 	case protocol.TypeTaskResult:
 		h.eventBus.Publish(events.Event{
-			Type: events.EventType(protocol.TypeTaskResult),
+			Type: events.TaskResult,
 			Payload: map[string]interface{}{
 				"agent_id": agentID,
 				"payload":  msg.Payload,

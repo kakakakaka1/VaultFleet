@@ -27,12 +27,17 @@ func NewHub() *Hub {
 
 func (h *Hub) Add(agentID string, conn *SafeConn) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	previous := h.agents[agentID]
 
 	h.agents[agentID] = &AgentStatus{
 		Conn:       conn,
 		Online:     true,
 		LastSeenAt: time.Now(),
+	}
+	h.mu.Unlock()
+
+	if previous != nil && previous.Conn != nil && previous.Conn != conn {
+		_ = previous.Conn.Close()
 	}
 }
 
@@ -53,13 +58,36 @@ func (h *Hub) Remove(agentID string) {
 func (h *Hub) Send(agentID string, msg interface{}) error {
 	h.mu.RLock()
 	status, ok := h.agents[agentID]
+	var conn *SafeConn
+	online := false
+	if ok && status != nil {
+		conn = status.Conn
+		online = status.Online
+	}
 	h.mu.RUnlock()
 
-	if !ok || status == nil || !status.Online || status.Conn == nil {
+	if !ok || !online || conn == nil {
 		return ErrAgentNotConnected
 	}
 
-	return status.Conn.WriteJSON(msg)
+	return conn.WriteJSON(msg)
+}
+
+func (h *Hub) RemoveIfCurrent(agentID string, conn *SafeConn) bool {
+	h.mu.Lock()
+	status, ok := h.agents[agentID]
+	if !ok || status == nil || status.Conn != conn {
+		h.mu.Unlock()
+		return false
+	}
+	status.Online = false
+	delete(h.agents, agentID)
+	h.mu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
+	return true
 }
 
 func (h *Hub) IsOnline(agentID string) bool {

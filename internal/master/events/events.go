@@ -8,6 +8,7 @@ const (
 	PolicyChanged EventType = "policy_changed"
 	AgentOnline   EventType = "agent_online"
 	AgentOffline  EventType = "agent_offline"
+	TaskResult    EventType = "task_result"
 )
 
 type Event struct {
@@ -41,6 +42,11 @@ func (b *Bus) Publish(event Event) {
 	b.mu.RUnlock()
 
 	for _, handler := range handlers {
-		handler(event)
+		func() {
+			defer func() {
+				_ = recover()
+			}()
+			handler(event)
+		}()
 	}
 }
