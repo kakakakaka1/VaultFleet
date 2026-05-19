@@ -20,7 +20,7 @@
 - Master 系统、CPU 架构、是否使用反向代理。
 - Agent 系统、CPU 架构、init system 和安装方式。
 - 复现步骤或你已经尝试过的操作。
-- 失败任务的 `error_log`，尤其是备份、恢复、快照刷新和策略同步问题。
+- 失败任务的 `error_log`（如有），尤其是备份、恢复问题；快照刷新和策略同步错误可从 UI 或 API 响应中复制（如有）。
 - Master 日志和 Agent 日志。
 
 ## Master 日志
@@ -123,7 +123,7 @@ Try to include:
 - Master OS, CPU architecture, and reverse proxy if any.
 - Agent OS, CPU architecture, init system, and installation method.
 - Reproduction steps or actions already tried.
-- Failed task `error_log`, especially for backup, restore, snapshot refresh, and policy sync issues.
+- Failed task `error_log` where available, especially for backup and restore issues; snapshot refresh and policy sync errors can be copied from UI/API responses where available.
 - Master logs and Agent logs.
 
 ## Master Logs
