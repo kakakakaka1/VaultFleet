@@ -1,0 +1,133 @@
+name: Support request / 使用支持
+description: Ask for help with setup, configuration, storage, backup, or restore. / 请求安装、配置、存储、备份或恢复相关帮助。
+title: "[Support]: "
+labels:
+  - support
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when you are not sure whether the behavior is a product bug.
+
+        如果你不确定当前问题是否是产品缺陷，请使用这个表单。提交前请先脱敏 token、密码、cookie、rclone 凭据和私有 endpoint。
+
+  - type: input
+    id: goal
+    attributes:
+      label: Goal / 你想完成什么
+      description: Describe the operation or setup you are trying to complete. / 描述你正在尝试完成的操作或部署目标。
+      placeholder: Configure WebDAV storage and run the first backup / 配置 WebDAV 存储并执行第一次备份
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: VaultFleet version / VaultFleet 版本
+      description: Provide the Docker image tag, release tag, or commit SHA. / 请填写 Docker 镜像 tag、release tag 或 commit SHA。
+      placeholder: ghcr.io/momo-z/vaultfleet:latest or commit abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic / 问题类型
+      description: Pick the closest topic. / 选择最接近的问题类型。
+      options:
+        - Installation / 安装
+        - Master setup / Master 配置
+        - Agent enrollment / Agent 注册
+        - Storage configuration / 存储配置
+        - Backup policy / 备份策略
+        - Restore / 恢复
+        - Notifications / 通知
+        - Release or upgrade / 发布或升级
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment method / 部署方式
+      description: How is VaultFleet running? / VaultFleet 是如何运行的？
+      options:
+        - Docker Compose
+        - Docker
+        - Source build / 源码运行
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_state
+    attributes:
+      label: Current state / 当前状态
+      description: What has already been installed or configured? / 当前已经安装或配置到哪一步？
+      placeholder: |
+        Master is running in Docker Compose.
+        One Agent was created in the UI.
+        Agent installation command fails during enrollment.
+    validations:
+      required: true
+
+  - type: textarea
+    id: storage_backend
+    attributes:
+      label: Storage backend / 存储后端
+      description: Name the backend type only. Do not paste access keys or secrets. / 只填写后端类型，不要粘贴 access key 或 secret。
+      placeholder: S3-compatible storage, Cloudflare R2, MinIO, WebDAV, SFTP, or other
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 环境信息
+      description: Include Master and Agent OS, architecture, and init system when relevant. / 请包含相关 Master 和 Agent 的系统、架构和 init system。
+      placeholder: |
+        Master: Ubuntu 24.04, amd64, Docker Compose
+        Agent: Debian 12, arm64, systemd
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you already tried / 已经尝试过什么
+      description: Include commands, UI actions, or documentation steps. / 请列出执行过的命令、UI 操作或文档步骤。
+      placeholder: |
+        1. Ran docker compose up -d
+        2. Created an Agent in the UI
+        3. Ran the install.sh command on the target server
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / 相关日志
+      description: Paste Master logs, Agent logs, or task error_log if relevant. / 如相关，请粘贴 Master 日志、Agent 日志或任务 error_log。
+      render: shell
+      placeholder: journalctl -u vaultfleet-agent --since "24 hours ago" --no-pager
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra_context
+    attributes:
+      label: Extra context / 补充信息
+      description: Add any other detail that may help. / 补充其他可能有帮助的信息。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction confirmation / 脱敏确认
+      description: Confirm that secrets were removed before submitting. / 提交前请确认已经移除敏感信息。
+      options:
+        - label: I have redacted enrollment tokens, agent tokens, cookies, restic passwords, rclone credentials, storage secrets, and private endpoints where needed. / 我已经按需脱敏 enrollment token、agent token、cookie、restic password、rclone 凭据、存储密钥和私有 endpoint。
+          required: true

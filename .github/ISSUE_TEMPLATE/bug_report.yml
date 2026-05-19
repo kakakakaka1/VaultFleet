@@ -1,0 +1,168 @@
+name: Bug report / 缺陷反馈
+description: Report a reproducible VaultFleet bug. / 提交可复现的 VaultFleet 缺陷。
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a VaultFleet bug.
+
+        感谢反馈 VaultFleet 缺陷。请尽量填写完整信息，并在提交前脱敏 token、密码、cookie、rclone 凭据和私有 endpoint。
+
+  - type: input
+    id: summary
+    attributes:
+      label: Summary / 问题摘要
+      description: What broke? / 哪个功能出问题了？
+      placeholder: Backup fails when pushing to an S3-compatible backend / 备份写入 S3 兼容存储时失败
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: VaultFleet version / VaultFleet 版本
+      description: Provide the Docker image tag, release tag, or commit SHA. / 请填写 Docker 镜像 tag、release tag 或 commit SHA。
+      placeholder: ghcr.io/momo-z/vaultfleet:v0.1.0 or commit abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area / 影响范围
+      description: Pick the closest area. / 选择最接近的问题范围。
+      options:
+        - Master / 主控
+        - Agent / 节点
+        - Web UI / 网页界面
+        - Installation / 安装
+        - Backup / 备份
+        - Restore / 恢复
+        - Snapshots / 快照
+        - Policy sync / 策略同步
+        - Storage backend / 存储后端
+        - Notifications / 通知
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment method / 部署方式
+      description: How is VaultFleet running? / VaultFleet 是如何运行的？
+      options:
+        - Docker Compose
+        - Docker
+        - Source build / 源码运行
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: master_environment
+    attributes:
+      label: Master environment / Master 环境
+      description: Include OS, architecture, reverse proxy, and browser if this is a UI issue. / 请包含系统、架构、反向代理；如果是 UI 问题，也请包含浏览器。
+      placeholder: |
+        OS: Ubuntu 24.04
+        Architecture: amd64
+        Reverse proxy: nginx + HTTPS
+        Browser: Chrome 125
+    validations:
+      required: true
+
+  - type: textarea
+    id: agent_environment
+    attributes:
+      label: Agent environment / Agent 环境
+      description: Include OS, architecture, init system, and installation method. / 请包含系统、架构、init system 和安装方式。
+      placeholder: |
+        OS: Debian 12
+        Architecture: arm64
+        Init system: systemd
+        Install method: install.sh from Master
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps / 复现步骤
+      description: List exact steps. / 请列出明确步骤。
+      placeholder: |
+        1. Create a storage config with ...
+        2. Create a backup policy for ...
+        3. Click "Backup now"
+        4. See the failure in task history
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 预期行为
+      description: What should have happened? / 你预期应该发生什么？
+      placeholder: Backup should finish successfully and create a snapshot. / 备份应成功完成并创建快照。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / 实际行为
+      description: What actually happened? / 实际发生了什么？
+      placeholder: Task failed with repository lock error. / 任务因仓库锁错误失败。
+    validations:
+      required: true
+
+  - type: textarea
+    id: master_logs
+    attributes:
+      label: Master logs / Master 日志
+      description: Paste relevant logs from Docker, Docker Compose, or your process manager. / 粘贴 Docker、Docker Compose 或进程管理器中的相关日志。
+      render: shell
+      placeholder: docker compose logs --tail=300 vaultfleet
+    validations:
+      required: false
+
+  - type: textarea
+    id: agent_logs
+    attributes:
+      label: Agent logs / Agent 日志
+      description: Paste relevant Agent logs from systemd, OpenRC, or fallback log file. / 粘贴 systemd、OpenRC 或 fallback 日志文件中的相关 Agent 日志。
+      render: shell
+      placeholder: journalctl -u vaultfleet-agent --since "24 hours ago" --no-pager
+    validations:
+      required: false
+
+  - type: textarea
+    id: task_error_log
+    attributes:
+      label: Task error_log / 任务 error_log
+      description: If the bug involves backup, restore, snapshots, or policy sync, paste the failed task error_log. / 如果问题涉及备份、恢复、快照或策略同步，请粘贴失败任务的 error_log。
+      render: shell
+      placeholder: "backup: run restic backup: exit status 1: ..."
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or extra context / 截图或补充信息
+      description: Add screenshots or other context if useful. / 如有帮助，请补充截图或其他上下文。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction confirmation / 脱敏确认
+      description: Confirm that secrets were removed before submitting. / 提交前请确认已经移除敏感信息。
+      options:
+        - label: I have redacted enrollment tokens, agent tokens, cookies, restic passwords, rclone credentials, storage secrets, and private endpoints where needed. / 我已经按需脱敏 enrollment token、agent token、cookie、restic password、rclone 凭据、存储密钥和私有 endpoint。
+          required: true
