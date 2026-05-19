@@ -53,6 +53,8 @@ OpenRC：
 rc-service vaultfleet-agent status
 ```
 
+这个命令只用于检查服务状态。OpenRC 的日志位置取决于系统 logger 或服务管理器，请同时提供相关系统日志行。
+
 没有受支持 init system 时，安装脚本会用 `nohup` 启动 Agent，并写入 fallback 日志：
 
 ```bash
@@ -79,6 +81,8 @@ GET /api/tasks?agent_id=<agent-id>&status=failed
 - `/data/master.key`
 - 完整的 `/data/vaultfleet.db`
 - 完整的 `/etc/vaultfleet/agent.yaml`
+- 完整的 `/etc/vaultfleet/rclone.conf`
+- 完整的 `/etc/vaultfleet/.restic-password`
 
 请脱敏：
 
@@ -152,6 +156,8 @@ OpenRC:
 rc-service vaultfleet-agent status
 ```
 
+This command only checks service state. OpenRC log location depends on the system logger or service manager, so include the relevant system log lines too.
+
 When no supported init system is available, the installer starts the Agent with `nohup` and writes fallback logs:
 
 ```bash
@@ -178,6 +184,8 @@ Do not upload or paste:
 - `/data/master.key`
 - The full `/data/vaultfleet.db`
 - The full `/etc/vaultfleet/agent.yaml`
+- The full `/etc/vaultfleet/rclone.conf`
+- The full `/etc/vaultfleet/.restic-password`
 
 Redact:
 
