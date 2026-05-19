@@ -2,8 +2,7 @@ name: Support request / 使用支持
 description: Ask for help with setup, configuration, storage, backup, or restore. / 请求安装、配置、存储、备份或恢复相关帮助。
 title: "[Support]: "
 labels:
-  - support
-  - needs-triage
+  - question
 body:
   - type: markdown
     attributes:

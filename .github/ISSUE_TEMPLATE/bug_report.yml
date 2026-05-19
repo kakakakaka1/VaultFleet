@@ -3,7 +3,6 @@ description: Report a reproducible VaultFleet bug. / 提交可复现的 VaultFle
 title: "[Bug]: "
 labels:
   - bug
-  - needs-triage
 body:
   - type: markdown
     attributes:
