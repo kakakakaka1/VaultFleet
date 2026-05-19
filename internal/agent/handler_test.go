@@ -498,6 +498,7 @@ func TestHandleBackupNowLoadsPolicyRunsBackupAndSendsTaskResult(t *testing.T) {
 	messages := sent.snapshot()
 	require.Len(t, messages, 1)
 	assert.Equal(t, protocol.TypeTaskResult, messages[0].Type)
+	assert.Equal(t, msg.ID, messages[0].ID)
 	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[0])
 	require.NoError(t, err)
 	assert.Equal(t, "agent-1", result.AgentID)
@@ -581,6 +582,7 @@ func TestHandleBackupNowPreventsOverlappingRuns(t *testing.T) {
 
 	messages := sent.snapshot()
 	require.Len(t, messages, 1)
+	assert.Equal(t, msg.ID, messages[0].ID)
 	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[0])
 	require.NoError(t, err)
 	assert.Equal(t, "failed", result.Status)
@@ -592,10 +594,32 @@ func TestHandleBackupNowPreventsOverlappingRuns(t *testing.T) {
 
 	messages = sent.snapshot()
 	require.Len(t, messages, 2)
+	assert.Equal(t, msg.ID, messages[1].ID)
 	result, err = protocol.ParsePayload[protocol.TaskResultPayload](&messages[1])
 	require.NoError(t, err)
 	assert.Equal(t, "success", result.Status)
 	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestHandleBackupNowParseFailureUsesRequestMessageID(t *testing.T) {
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		AgentID:  "agent-1",
+		SendFunc: sent.send,
+	})
+	msg := protocol.Message{ID: "backup-msg-1", Type: protocol.TypeBackupNow, Payload: []byte("{")}
+
+	handler.Handle(msg)
+
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	assert.Equal(t, protocol.TypeTaskResult, messages[0].Type)
+	assert.Equal(t, msg.ID, messages[0].ID)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", result.AgentID)
+	assert.Equal(t, "failed", result.Status)
+	assert.Contains(t, result.ErrorLog, "parse backup_now")
 }
 
 func TestHandleBackupNowPersistsPendingResultWhenSendFails(t *testing.T) {
@@ -624,7 +648,7 @@ func TestHandleBackupNowPersistsPendingResultWhenSendFails(t *testing.T) {
 	pending, err := store.LoadPendingResults()
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
-	assert.Empty(t, pending[0].MessageID)
+	assert.Equal(t, msg.ID, pending[0].MessageID)
 	assert.Equal(t, "agent-1", pending[0].Payload.AgentID)
 	assert.Equal(t, "backup", pending[0].Payload.TaskType)
 	assert.Equal(t, "success", pending[0].Payload.Status)

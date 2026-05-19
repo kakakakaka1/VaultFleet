@@ -198,6 +198,30 @@ func TestCheckAndRestore_BackupZipWithSubdirs(t *testing.T) {
 	assertFileContent(t, filepath.Join(dataDir, "configs", "rclone", "remote.conf"), "remote config")
 }
 
+func TestCheckAndRestore_CleansRestoreStagingInsideDataDir(t *testing.T) {
+	dataDir := setupTestDataDir(t)
+	createTestBackupZip(t, dataDir, map[string]string{
+		"downloads/agent-linux-amd64": "agent binary",
+		"vaultfleet.db":               "restored db",
+	})
+
+	restored, err := CheckAndRestore(dataDir)
+
+	require.NoError(t, err)
+	assert.True(t, restored)
+	assertFileContent(t, filepath.Join(dataDir, "downloads", "agent-linux-amd64"), "agent binary")
+
+	matches, err := filepath.Glob(filepath.Join(dataDir, "rollback", ".vaultfleet-restore-*"))
+	require.NoError(t, err)
+	assert.Empty(t, matches)
+}
+
+func TestRestoreStagingParentUsesRollbackDirInsideDataDir(t *testing.T) {
+	dataDir := filepath.Join(string(filepath.Separator), "data")
+
+	assert.Equal(t, filepath.Join(dataDir, "rollback"), restoreStagingParent(dataDir))
+}
+
 func TestCheckAndRestore_InvalidZip(t *testing.T) {
 	dataDir := setupTestDataDir(t)
 	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "backup.zip"), []byte("not a zip"), 0644))

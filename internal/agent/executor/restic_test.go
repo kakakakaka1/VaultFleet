@@ -32,6 +32,21 @@ func TestBuildInitCmdIncludesRepoPasswordAndRcloneConfigEnv(t *testing.T) {
 	assertEnvContains(t, cmd.Env, "RCLONE_CONFIG=/tmp/rclone.conf")
 }
 
+func TestBuildInitCmdProvidesCacheDirWhenServiceEnvironmentOmitsHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	configDir := t.TempDir()
+	runner := ResticRunner{
+		RcloneConfPath: filepath.Join(configDir, "rclone.conf"),
+		PasswordFile:   filepath.Join(configDir, ".restic-password"),
+		RepoPath:       "backups/agent-1",
+	}
+
+	cmd := runner.buildInitCmd()
+
+	assertEnvContains(t, cmd.Env, "XDG_CACHE_HOME="+filepath.Join(configDir, ".cache"))
+}
+
 func TestBuildBackupCmdIncludesExcludesAndDirectories(t *testing.T) {
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
@@ -126,22 +141,40 @@ func TestBuildRestoreCmdIncludesSnapshotAndTarget(t *testing.T) {
 }
 
 func TestInitRepoIgnoresAlreadyInitializedError(t *testing.T) {
-	dir := t.TempDir()
-	writeFakeRestic(t, dir, fakeResticScript{
-		Stdout: "",
-		Stderr: "repository already initialized\n",
-		Exit:   1,
-	})
-	prependPath(t, dir)
-
-	runner := ResticRunner{
-		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
-		RepoPath:       "repo",
+	tests := []struct {
+		name   string
+		stderr string
+	}{
+		{
+			name:   "restic already initialized",
+			stderr: "repository already initialized\n",
+		},
+		{
+			name: "rclone config already exists",
+			stderr: "Fatal: create repository at rclone:vaultfleet:repo failed: " +
+				"Fatal: unable to open repository at rclone:vaultfleet:repo: config file already exists\n",
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFakeRestic(t, dir, fakeResticScript{
+				Stdout: "",
+				Stderr: tt.stderr,
+				Exit:   1,
+			})
+			prependPath(t, dir)
 
-	if err := runner.InitRepo(context.Background()); err != nil {
-		t.Fatalf("InitRepo() error = %v, want nil", err)
+			runner := ResticRunner{
+				RcloneConfPath: "/tmp/rclone.conf",
+				PasswordFile:   "/tmp/.restic-password",
+				RepoPath:       "repo",
+			}
+
+			if err := runner.InitRepo(context.Background()); err != nil {
+				t.Fatalf("InitRepo() error = %v, want nil", err)
+			}
+		})
 	}
 }
 

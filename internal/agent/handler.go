@@ -167,7 +167,7 @@ func (h *Handler) handlePolicyPush(msg protocol.Message) {
 		if pushedPolicy.Schedule == "" {
 			h.scheduler.RemoveJob(pushedPolicy.AgentID)
 		} else if err := h.scheduler.UpdateSchedule(pushedPolicy.AgentID, pushedPolicy.Schedule, func() {
-			h.runBackupForPolicy(pushedPolicy.AgentID, pushedPolicy)
+			h.runBackupForPolicy("", pushedPolicy.AgentID, pushedPolicy)
 		}); err != nil {
 			log.Printf("update backup schedule failed: %v", err)
 			rollbackState.restore()
@@ -426,7 +426,7 @@ func (h *Handler) handleBackupNow(msg protocol.Message) {
 	backupNow, err := protocol.ParsePayload[protocol.BackupNowPayload](&msg)
 	if err != nil {
 		log.Printf("parse backup_now failed: %v", err)
-		h.sendTaskResult(h.failedTaskResult(h.agentID, "parse backup_now: "+err.Error(), time.Now()))
+		h.sendTaskResultWithID(msg.ID, h.failedTaskResult(h.agentID, "parse backup_now: "+err.Error(), time.Now()))
 		return
 	}
 
@@ -435,23 +435,23 @@ func (h *Handler) handleBackupNow(msg protocol.Message) {
 		agentID = h.agentID
 	}
 	if h.policyStore == nil {
-		h.sendTaskResult(h.failedTaskResult(agentID, "policy store not configured", time.Now()))
+		h.sendTaskResultWithID(msg.ID, h.failedTaskResult(agentID, "policy store not configured", time.Now()))
 		return
 	}
 
 	policyPayload, err := h.policyStore.LoadPolicy()
 	if err != nil {
 		log.Printf("load policy failed: %v", err)
-		h.sendTaskResult(h.failedTaskResult(agentID, "load policy: "+err.Error(), time.Now()))
+		h.sendTaskResultWithID(msg.ID, h.failedTaskResult(agentID, "load policy: "+err.Error(), time.Now()))
 		return
 	}
 	if agentID == "" {
 		agentID = policyPayload.AgentID
 	}
-	h.runBackupForPolicy(agentID, policyPayload)
+	h.runBackupForPolicy(msg.ID, agentID, policyPayload)
 }
 
-func (h *Handler) runBackupForPolicy(agentID string, policyPayload *protocol.PolicyPushPayload) {
+func (h *Handler) runBackupForPolicy(messageID string, agentID string, policyPayload *protocol.PolicyPushPayload) {
 	if policyPayload == nil {
 		return
 	}
@@ -459,14 +459,14 @@ func (h *Handler) runBackupForPolicy(agentID string, policyPayload *protocol.Pol
 		agentID = policyPayload.AgentID
 	}
 	if !h.beginBackup() {
-		h.sendTaskResult(h.failedTaskResult(agentID, "backup already running", time.Now()))
+		h.sendTaskResultWithID(messageID, h.failedTaskResult(agentID, "backup already running", time.Now()))
 		return
 	}
 	defer h.endBackup()
 
 	startedAt := time.Now()
 	result := h.backupRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload))
-	h.sendTaskResult(result.ToProtocol(agentID, startedAt))
+	h.sendTaskResultWithID(messageID, result.ToProtocol(agentID, startedAt))
 }
 
 func (h *Handler) beginBackup() bool {

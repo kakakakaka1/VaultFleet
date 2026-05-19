@@ -31,7 +31,7 @@ func CheckAndRestore(dataDir string) (bool, error) {
 		return false, err
 	}
 
-	stagingDir, err := os.MkdirTemp(filepath.Dir(dataDirAbs), ".vaultfleet-restore-*")
+	stagingDir, err := os.MkdirTemp(restoreStagingParent(dataDirAbs), ".vaultfleet-restore-*")
 	if err != nil {
 		return false, fmt.Errorf("create restore staging dir: %w", err)
 	}
@@ -50,6 +50,10 @@ func CheckAndRestore(dataDir string) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func restoreStagingParent(dataDir string) string {
+	return filepath.Join(dataDir, "rollback")
 }
 
 func createRollback(dataDir string) (string, error) {

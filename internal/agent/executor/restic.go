@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ type ResticRunner struct {
 	RcloneConfPath string
 	PasswordFile   string
 	RepoPath       string
+	CacheDir       string
 }
 
 func (r ResticRunner) repoArg() string {
@@ -40,11 +42,18 @@ func (r ResticRunner) repoArg() string {
 func (r ResticRunner) baseEnv() []string {
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "RCLONE_CONFIG=") {
+		if !strings.HasPrefix(entry, "RCLONE_CONFIG=") && !strings.HasPrefix(entry, "XDG_CACHE_HOME=") {
 			env = append(env, entry)
 		}
 	}
-	return append(env, "RCLONE_CONFIG="+r.RcloneConfPath)
+	return append(env, "RCLONE_CONFIG="+r.RcloneConfPath, "XDG_CACHE_HOME="+r.cacheDir())
+}
+
+func (r ResticRunner) cacheDir() string {
+	if r.CacheDir != "" {
+		return r.CacheDir
+	}
+	return filepath.Join(filepath.Dir(r.RcloneConfPath), ".cache")
 }
 
 func (r ResticRunner) baseArgs() []string {
@@ -127,12 +136,18 @@ func (r ResticRunner) InitRepo(ctx context.Context) error {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		if strings.Contains(strings.ToLower(stderr.String()), "already initialized") {
+		if isAlreadyInitializedRepo(stderr.String()) {
 			return nil
 		}
 		return commandError("initialize restic repository", stderr.String(), err)
 	}
 	return nil
+}
+
+func isAlreadyInitializedRepo(stderr string) bool {
+	normalized := strings.ToLower(stderr)
+	return strings.Contains(normalized, "already initialized") ||
+		strings.Contains(normalized, "config file already exists")
 }
 
 func (r ResticRunner) RunBackup(ctx context.Context, dirs []string, excludes []string) (string, error) {
