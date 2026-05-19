@@ -173,6 +173,33 @@ func TestCurrentPolicyLookupUnsyncedPolicyReturnsPolicyPushWithDecryptedCredenti
 	assert.Equal(t, protocol.RetentionPolicy{KeepLast: 3}, payload.Retention)
 }
 
+func TestCurrentPolicyLookupMovesS3BucketIntoRepoPath(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent := createStorageTestAgent(t, database, "Tokyo-1")
+	storage := db.StorageConfig{
+		Name:       "MinIO",
+		RcloneType: "s3",
+		RcloneConfig: mustEncryptMap(t, database, map[string]any{
+			"provider":          "Other",
+			"endpoint":          "https://minio.example.test",
+			"access_key_id":     "AKID123",
+			"secret_access_key": "SECRET456",
+			"bucket":            "test",
+		}),
+	}
+	require.NoError(t, database.DB.Create(&storage).Error)
+	createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+
+	msg, ok := CurrentPolicyLookup(database)(agent.ID)
+
+	require.True(t, ok)
+	payload, err := protocol.ParsePayload[protocol.PolicyPushPayload](msg)
+	require.NoError(t, err)
+	assert.Equal(t, "test/vaultfleet/"+agent.ID, payload.Storage.RepoPath)
+	assert.NotContains(t, payload.Storage.RcloneConfig, "bucket")
+	assert.Equal(t, "https://minio.example.test", payload.Storage.RcloneConfig["endpoint"])
+}
+
 func TestCurrentPolicyLookupRejectsNonStringRcloneConfigValues(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent := createStorageTestAgent(t, database, "Tokyo-1")
@@ -234,6 +261,33 @@ func TestPolicyAckProcessorSuccessfulAckMarksNewestUnsyncedPolicySynced(t *testi
 	var storedNewer db.BackupPolicy
 	require.NoError(t, database.DB.First(&storedNewer, "id = ?", newer.ID).Error)
 	assert.True(t, storedNewer.Synced)
+}
+
+func TestPolicyChangedPusherSendsCurrentPolicyToOnlineAgent(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
+	tracker := NewPolicyPushTracker()
+
+	pusher := NewPolicyChangedPusher(database, hub, CurrentPolicyLookupWithTracker(database, tracker))
+	pusher.Handle(events.Event{
+		Type: events.PolicyChanged,
+		Payload: map[string]interface{}{
+			"agent_id": agent.ID,
+			"action":   "updated",
+		},
+	})
+
+	require.Len(t, hub.sent, 1)
+	sent := hub.sent[0].message
+	assert.Equal(t, protocol.TypePolicyPush, sent.Type)
+	payload, err := protocol.ParsePayload[protocol.PolicyPushPayload](&sent)
+	require.NoError(t, err)
+	assert.Equal(t, agent.ID, payload.AgentID)
+	tracked, ok := tracker.Get(sent.ID, agent.ID)
+	require.True(t, ok)
+	assert.Equal(t, policy.ID, tracked.PolicyID)
 }
 
 func TestPolicyAckProcessorSuccessfulOldAckDoesNotMarkNewerPolicySynced(t *testing.T) {

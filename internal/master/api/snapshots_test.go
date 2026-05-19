@@ -268,8 +268,12 @@ func TestListSnapshots(t *testing.T) {
 	w := getJSON(t, setup.router, "/api/agents/"+agent.ID+"/snapshots")
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	envelope := parseJSON(t, w)
+	assert.Equal(t, true, envelope["ok"])
+	data, err := json.Marshal(envelope["data"])
+	require.NoError(t, err)
 	var body []snapshotAPITestResponse
-	parseJSONInto(t, w, &body)
+	require.NoError(t, json.Unmarshal(data, &body))
 	require.Len(t, body, 2)
 	assert.Equal(t, "snap-new", body[0].SnapshotID)
 	assert.True(t, body[0].Timestamp.Equal(newer))
@@ -317,8 +321,13 @@ func TestRefreshSnapshots(t *testing.T) {
 	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/snapshots/refresh", map[string]any{})
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	envelope := parseJSON(t, w)
+	assert.Equal(t, true, envelope["ok"])
+	assert.Equal(t, float64(1), envelope["count"])
+	data, err := json.Marshal(envelope["data"])
+	require.NoError(t, err)
 	var body snapshotRefreshAPITestResponse
-	parseJSONInto(t, w, &body)
+	require.NoError(t, json.Unmarshal(data, &body))
 	assert.Equal(t, 1, body.Count)
 	require.Len(t, body.Snapshots, 1)
 	assert.Equal(t, "snap-1", body.Snapshots[0].SnapshotID)
@@ -336,6 +345,9 @@ func TestRefreshSnapshotsOffline(t *testing.T) {
 	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/snapshots/refresh", map[string]any{})
 
 	require.Equal(t, http.StatusBadGateway, w.Code)
+	body := parseJSON(t, w)
+	assert.Equal(t, false, body["ok"])
+	assert.Equal(t, "agent offline", body["error"])
 }
 
 func TestRefreshSnapshotsTimeout(t *testing.T) {

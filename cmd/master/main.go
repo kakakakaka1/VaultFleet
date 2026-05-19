@@ -41,16 +41,20 @@ func main() {
 
 	hub := ws.NewHub()
 	bus := events.NewBus()
+	api.SubscribeAgentStateEvents(database, bus)
 	notify.NewDispatcher(database, bus).Start()
+	policyLookup := api.CurrentPolicyLookup(database)
 
 	wsHandler := ws.NewHandler(
 		hub,
 		bus,
 		api.AuthenticateAgentByToken(database),
-		api.CurrentPolicyLookup(database),
+		policyLookup,
 		api.NewTaskResultProcessor(database),
 	)
 	wsHandler.PolicyAckProcessor = api.NewPolicyAckProcessor(database)
+	wsHandler.AgentStateUpdater = api.NewAgentStateUpdater(database)
+	bus.Subscribe(events.PolicyChanged, api.NewPolicyChangedPusher(database, hub, policyLookup).Handle)
 	router := api.NewRouter(api.RouterConfig{
 		Database:       database,
 		Hub:            hub,
@@ -64,14 +68,15 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go ws.NewMonitor(hub, bus).Run(ctx)
+
 	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("VaultFleet master listening on %s", *addr)
 		serverErr <- server.ListenAndServe()
 	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	select {
 	case <-ctx.Done():

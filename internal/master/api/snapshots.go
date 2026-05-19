@@ -69,7 +69,7 @@ func (h *SnapshotHandler) ListSnapshots(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, snapshots)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "data": snapshots})
 }
 
 func (h *SnapshotHandler) RefreshSnapshots(c *gin.Context) {
@@ -78,13 +78,13 @@ func (h *SnapshotHandler) RefreshSnapshots(c *gin.Context) {
 		return
 	}
 	if h.Hub == nil || !h.Hub.IsOnline(agentID) {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "agent offline"})
+		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
 		return
 	}
 
 	msg, err := protocol.NewMessage(protocol.TypeSnapshotListReq, protocol.SnapshotListReqPayload{AgentID: agentID})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "encode snapshot list request"})
+		writeErrorResponse(c, http.StatusInternalServerError, "encode snapshot list request")
 		return
 	}
 
@@ -93,53 +93,53 @@ func (h *SnapshotHandler) RefreshSnapshots(c *gin.Context) {
 		wait = h.Hub.SendAndWait
 	}
 	if wait == nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "agent offline"})
+		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
 		return
 	}
 
 	respCh, err := wait(agentID, *msg, h.timeout)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "agent offline"})
+		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
 		return
 	}
 
 	select {
 	case resp, ok := <-respCh:
 		if !ok {
-			c.JSON(http.StatusGatewayTimeout, gin.H{"error": "timeout waiting for agent response"})
+			writeErrorResponse(c, http.StatusGatewayTimeout, "timeout waiting for agent response")
 			return
 		}
 		if resp.Type != protocol.TypeSnapshotListResp {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "invalid agent response"})
+			writeErrorResponse(c, http.StatusBadGateway, "invalid agent response")
 			return
 		}
 		payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&resp)
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "invalid agent response"})
+			writeErrorResponse(c, http.StatusBadGateway, "invalid agent response")
 			return
 		}
 		if payload.Error != "" {
-			c.JSON(http.StatusBadGateway, gin.H{"error": payload.Error})
+			writeErrorResponse(c, http.StatusBadGateway, payload.Error)
 			return
 		}
 		if err := upsertSnapshots(h.DB, agentID, payload.Snapshots); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			writeErrorResponse(c, http.StatusInternalServerError, "database error")
 			return
 		}
 		snapshots, ok := h.loadSnapshotResponses(c, agentID)
 		if !ok {
 			return
 		}
-		c.JSON(http.StatusOK, snapshotRefreshResponse{Count: len(payload.Snapshots), Snapshots: snapshots})
+		writeDataResponse(c, http.StatusOK, snapshotRefreshResponse{Count: len(payload.Snapshots), Snapshots: snapshots})
 	case <-c.Request.Context().Done():
-		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "request cancelled"})
+		writeErrorResponse(c, http.StatusGatewayTimeout, "request cancelled")
 	}
 }
 
 func (h *SnapshotHandler) loadSnapshotResponses(c *gin.Context, agentID string) ([]snapshotResponse, bool) {
 	var snapshots []db.Snapshot
 	if err := h.DB.DB.Where("agent_id = ?", agentID).Order("timestamp DESC").Find(&snapshots).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		writeErrorResponse(c, http.StatusInternalServerError, "database error")
 		return nil, false
 	}
 
@@ -147,7 +147,7 @@ func (h *SnapshotHandler) loadSnapshotResponses(c *gin.Context, agentID string) 
 	for _, snapshot := range snapshots {
 		response, err := newSnapshotResponse(snapshot)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "decode snapshot"})
+			writeErrorResponse(c, http.StatusInternalServerError, "decode snapshot")
 			return nil, false
 		}
 		responses = append(responses, response)
@@ -318,10 +318,10 @@ func agentExistsByID(c *gin.Context, database *db.Database, agentID string) bool
 	var agent db.Agent
 	if err := database.DB.First(&agent, "id = ?", agentID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+			writeErrorResponse(c, http.StatusNotFound, "agent not found")
 			return false
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		writeErrorResponse(c, http.StatusInternalServerError, "database error")
 		return false
 	}
 	return true

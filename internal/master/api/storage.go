@@ -99,7 +99,7 @@ func (h *ConfigHandler) ListStorage(c *gin.Context) {
 		responses = append(responses, response)
 	}
 
-	c.JSON(http.StatusOK, responses)
+	writeDataResponse(c, http.StatusOK, responses)
 }
 
 func (h *ConfigHandler) GetStorage(c *gin.Context) {
@@ -284,7 +284,7 @@ func (h *ConfigHandler) writeStorageResponse(c *gin.Context, status int, storage
 		return
 	}
 
-	c.JSON(status, response)
+	writeDataResponse(c, status, response)
 }
 
 func (h *ConfigHandler) newStorageResponse(storage db.StorageConfig) (storageResponse, error) {

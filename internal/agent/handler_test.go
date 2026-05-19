@@ -102,6 +102,68 @@ func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testin
 	require.Len(t, sent.snapshot(), 2)
 }
 
+func TestFlushPendingResultsSendsStoredResultsAndClearsOnSuccess(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	startedAt := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, store.SavePendingResults([]policy.PendingTaskResult{
+		{
+			MessageID: "backup-message-1",
+			Payload: protocol.TaskResultPayload{
+				AgentID:    "agent-1",
+				TaskType:   "backup",
+				Status:     "success",
+				SnapshotID: "snap-1",
+				StartedAt:  startedAt,
+				FinishedAt: startedAt.Add(time.Second),
+			},
+		},
+	}))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		SendFunc:    sent.send,
+	})
+
+	handler.FlushPendingResults()
+
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	assert.Equal(t, protocol.TypeTaskResult, messages[0].Type)
+	assert.Equal(t, "backup-message-1", messages[0].ID)
+	payload, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "snap-1", payload.SnapshotID)
+	pending, err := store.LoadPendingResults()
+	require.NoError(t, err)
+	assert.Nil(t, pending)
+}
+
+func TestFlushPendingResultsKeepsUnsentResults(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePendingResults([]policy.PendingTaskResult{
+		{MessageID: "msg-1", Payload: protocol.TaskResultPayload{AgentID: "agent-1", TaskType: "backup", Status: "success"}},
+		{MessageID: "msg-2", Payload: protocol.TaskResultPayload{AgentID: "agent-1", TaskType: "backup", Status: "success"}},
+	}))
+	var calls int
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		SendFunc: func(protocol.Message) error {
+			calls++
+			if calls == 2 {
+				return errors.New("not connected")
+			}
+			return nil
+		},
+	})
+
+	handler.FlushPendingResults()
+
+	pending, err := store.LoadPendingResults()
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, "msg-2", pending[0].MessageID)
+}
+
 func TestHandlePolicyPushSendsFailureAckAndDoesNotScheduleWhenConfigWriteFails(t *testing.T) {
 	store := policy.NewStore(t.TempDir())
 	configDir := filepath.Join(t.TempDir(), "config-file")

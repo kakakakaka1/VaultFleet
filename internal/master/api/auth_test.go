@@ -182,6 +182,27 @@ func TestCheckInit_WithUsers(t *testing.T) {
 	body := parseJSON(t, w)
 	data := body["data"].(map[string]any)
 	assert.Equal(t, true, data["initialized"])
+	assert.Equal(t, false, data["authenticated"])
+}
+
+func TestCheckInitReportsAuthenticatedSessionWhenCookieValid(t *testing.T) {
+	setup := setupTestAuth(t)
+
+	initResponse := initAdmin(t, setup.router)
+	require.Equal(t, http.StatusOK, initResponse.Code)
+	cookie := getSessionCookie(t, initResponse)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/check", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	setup.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	body := parseJSON(t, w)
+	data := body["data"].(map[string]any)
+	assert.Equal(t, true, data["initialized"])
+	assert.Equal(t, true, data["authenticated"])
+	assert.Equal(t, "admin", data["username"])
 }
 
 func TestInitSetup(t *testing.T) {

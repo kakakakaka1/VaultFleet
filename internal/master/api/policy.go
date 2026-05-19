@@ -159,7 +159,7 @@ func (h *PolicyHandler) ListPolicies(c *gin.Context) {
 		responses = append(responses, response)
 	}
 
-	c.JSON(http.StatusOK, responses)
+	writeDataResponse(c, http.StatusOK, responses)
 }
 
 func (h *PolicyHandler) GetPolicy(c *gin.Context) {
@@ -290,7 +290,7 @@ func (h *PolicyHandler) writePolicyResponse(c *gin.Context, status int, policy d
 		return
 	}
 
-	c.JSON(status, response)
+	writeDataResponse(c, status, response)
 }
 
 func (h *PolicyHandler) publishPolicyChanged(agentID string, action string) {

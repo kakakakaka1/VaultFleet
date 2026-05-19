@@ -104,10 +104,10 @@ func TestStorageResponsesRedactSecretFields(t *testing.T) {
 
 	w = getJSON(t, setup.router, "/api/storage")
 	require.Equal(t, http.StatusOK, w.Code)
-	var list []map[string]any
-	parseJSONInto(t, w, &list)
+	body = parseJSON(t, w)
+	list := requireList(t, body["data"])
 	require.Len(t, list, 1)
-	listConfig := requireMap(t, list[0]["rclone_config"])
+	listConfig := requireMap(t, requireMap(t, list[0])["rclone_config"])
 	assert.Equal(t, redactedSecretValue, listConfig["secret_access_key"])
 	assert.Equal(t, "Cloudflare", listConfig["provider"])
 
@@ -142,13 +142,15 @@ func TestListStorageConfigs(t *testing.T) {
 	w := getJSON(t, setup.router, "/api/storage")
 
 	require.Equal(t, http.StatusOK, w.Code)
-	var list []map[string]any
-	parseJSONInto(t, w, &list)
+	body := parseJSON(t, w)
+	assert.Equal(t, true, body["ok"])
+	list := requireList(t, body["data"])
 	require.Len(t, list, 2)
 
 	configsByName := map[string]map[string]any{}
 	for _, item := range list {
-		configsByName[item["name"].(string)] = requireMap(t, item["rclone_config"])
+		itemMap := requireMap(t, item)
+		configsByName[itemMap["name"].(string)] = requireMap(t, itemMap["rclone_config"])
 	}
 	assert.Equal(t, "a", configsByName["Storage A"]["key"])
 	assert.Equal(t, "b", configsByName["Storage B"]["key"])
@@ -427,6 +429,14 @@ func requireMap(t *testing.T, value any) map[string]any {
 
 	result, ok := value.(map[string]any)
 	require.True(t, ok, "expected map, got %T", value)
+	return result
+}
+
+func requireList(t *testing.T, value any) []any {
+	t.Helper()
+
+	result, ok := value.([]any)
+	require.True(t, ok, "expected list, got %T", value)
 	return result
 }
 

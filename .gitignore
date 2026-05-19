@@ -1,0 +1,10 @@
+# Binaries
+bin/
+*.exe
+
+# Data
+data/
+.playwright-cli/
+
+# Test specs with credentials
+docs/superpowers/specs/2026-05-19-vaultfleet-e2e-acceptance-test.md

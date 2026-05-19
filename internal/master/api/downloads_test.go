@@ -1,0 +1,57 @@
+package api
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestDownloadRoutesServeInstallerAndAgentBinary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dataDir := t.TempDir()
+	downloadsDir := filepath.Join(dataDir, "downloads")
+	require.NoError(t, os.MkdirAll(downloadsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(downloadsDir, "agent-linux-amd64"), []byte("agent-binary"), 0o644))
+
+	router := gin.New()
+	RegisterDownloadRoutes(router, dataDir)
+
+	w := getJSON(t, router, "/install.sh")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/x-shellscript")
+	assert.Contains(t, w.Body.String(), "VaultFleet Agent")
+	assert.Contains(t, w.Body.String(), "RESTIC_VERSION")
+	assert.Contains(t, w.Body.String(), "RCLONE_VERSION")
+	assert.Contains(t, w.Body.String(), `restic_${RESTIC_VERSION}_${OS}_${ARCH}.bz2`)
+	assert.Contains(t, w.Body.String(), `rclone-v${RCLONE_VERSION}-${OS}-${ARCH}.zip`)
+
+	w = getJSON(t, router, "/download/agent-linux-amd64")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "agent-binary", w.Body.String())
+}
+
+func TestServedInstallerMatchesBuildInstaller(t *testing.T) {
+	buildScript, err := os.ReadFile("../../../build/install.sh")
+	require.NoError(t, err)
+
+	assert.Equal(t, strings.TrimSpace(string(buildScript)), strings.TrimSpace(agentInstallScript))
+}
+
+func TestDownloadRoutesRejectMissingOrUnsafeAgentPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	RegisterDownloadRoutes(router, t.TempDir())
+
+	for _, path := range []string{"/download/agent-linux-sparc", "/download/../master.key", "/download/not-agent"} {
+		t.Run(path, func(t *testing.T) {
+			w := getJSON(t, router, path)
+			require.Equal(t, http.StatusNotFound, w.Code)
+		})
+	}
+}

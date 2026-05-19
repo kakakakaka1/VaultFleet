@@ -50,6 +50,9 @@ func TestRestoreOffline(t *testing.T) {
 	})
 
 	require.Equal(t, http.StatusBadGateway, w.Code)
+	body := parseJSON(t, w)
+	assert.Equal(t, false, body["ok"])
+	assert.Equal(t, "agent offline", body["error"])
 }
 
 func TestRestoreSendsMessageAndRecordsRunningTask(t *testing.T) {
@@ -64,9 +67,13 @@ func TestRestoreSendsMessageAndRecordsRunningTask(t *testing.T) {
 
 	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
 	body := parseJSON(t, w)
+	assert.Equal(t, true, body["ok"])
 	assert.Equal(t, "restore started", body["message"])
+	data := requireMap(t, body["data"])
+	assert.Equal(t, "restore started", data["message"])
 	messageID, ok := body["message_id"].(string)
 	require.True(t, ok)
+	assert.Equal(t, messageID, data["message_id"])
 	assert.NotEmpty(t, messageID)
 
 	require.Len(t, setup.hub.sent, 1)
@@ -86,6 +93,23 @@ func TestRestoreSendsMessageAndRecordsRunningTask(t *testing.T) {
 	assert.Equal(t, messageID, history.MessageID)
 	assert.NotNil(t, history.StartedAt)
 	assert.Nil(t, history.FinishedAt)
+}
+
+func TestRestoreAcceptsAcceptanceTargetAlias(t *testing.T) {
+	setup := setupRestoreAPI(t)
+	agent := createRestoreTestAgent(t, setup.database, "online")
+	setup.hub.online[agent.ID] = true
+
+	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/restore", map[string]any{
+		"snapshot_id": "snap-1",
+		"target":      "/opt/vaultfleet-restore",
+	})
+
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	require.Len(t, setup.hub.sent, 1)
+	payload, err := protocol.ParsePayload[protocol.RestoreReqPayload](&setup.hub.sent[0].message)
+	require.NoError(t, err)
+	assert.Equal(t, "/opt/vaultfleet-restore", payload.Target)
 }
 
 func TestRestoreRecordsRunningTaskBeforeSendingMessage(t *testing.T) {

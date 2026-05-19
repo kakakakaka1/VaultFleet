@@ -145,11 +145,19 @@ func (h *AuthHandler) CheckInit(c *gin.Context) {
 		return
 	}
 
+	data := gin.H{
+		"initialized":   count > 0,
+		"authenticated": false,
+	}
+	if token, err := c.Cookie(sessionCookieName); err == nil {
+		if session, ok := h.Sessions.Get(token); ok {
+			data["authenticated"] = true
+			data["username"] = session.Username
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"ok": true,
-		"data": gin.H{
-			"initialized": count > 0,
-		},
+		"ok":   true,
+		"data": data,
 	})
 }
 

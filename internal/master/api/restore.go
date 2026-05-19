@@ -22,7 +22,8 @@ type RestoreHub interface {
 
 type restoreRequest struct {
 	SnapshotID string `json:"snapshot_id" binding:"required"`
-	TargetPath string `json:"target_path" binding:"required"`
+	TargetPath string `json:"target_path"`
+	Target     string `json:"target"`
 }
 
 func NewRestoreHandler(database *db.Database, hub RestoreHub) *RestoreHandler {
@@ -41,20 +42,28 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 
 	var request restoreRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		writeErrorResponse(c, http.StatusBadRequest, "invalid request")
+		return
+	}
+	targetPath := request.TargetPath
+	if targetPath == "" {
+		targetPath = request.Target
+	}
+	if targetPath == "" {
+		writeErrorResponse(c, http.StatusBadRequest, "invalid request")
 		return
 	}
 	if h.Hub == nil || !h.Hub.IsOnline(agentID) {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "agent offline"})
+		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
 		return
 	}
 
 	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
 		SnapshotID: request.SnapshotID,
-		Target:     request.TargetPath,
+		Target:     targetPath,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "encode restore request"})
+		writeErrorResponse(c, http.StatusInternalServerError, "encode restore request")
 		return
 	}
 
@@ -68,7 +77,7 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 		StartedAt:  &startedAt,
 	}
 	if err := h.DB.DB.Create(&history).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		writeErrorResponse(c, http.StatusInternalServerError, "database error")
 		return
 	}
 
@@ -81,14 +90,14 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 			"error_log":   err.Error(),
 		}
 		if updateErr := h.DB.DB.Model(&history).Updates(updates).Error; updateErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			writeErrorResponse(c, http.StatusInternalServerError, "database error")
 			return
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": "agent offline"})
+		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
 		return
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{
+	writeDataResponse(c, http.StatusAccepted, gin.H{
 		"message":    "restore started",
 		"message_id": msg.ID,
 	})

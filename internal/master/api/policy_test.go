@@ -181,12 +181,14 @@ func TestListPoliciesOmitsResticPassword(t *testing.T) {
 	w := getJSON(t, setup.router, "/api/policies")
 
 	require.Equal(t, http.StatusOK, w.Code)
-	var list []map[string]any
-	parseJSONInto(t, w, &list)
+	body := parseJSON(t, w)
+	assert.Equal(t, true, body["ok"])
+	list := requireList(t, body["data"])
 	require.Len(t, list, 1)
-	assert.NotContains(t, list[0], "restic_password")
-	assertJSONList(t, list[0]["backup_dirs"], []string{"/etc"})
-	retention := requireMap(t, list[0]["retention"])
+	item := requireMap(t, list[0])
+	assert.NotContains(t, item, "restic_password")
+	assertJSONList(t, item["backup_dirs"], []string{"/etc"})
+	retention := requireMap(t, item["retention"])
 	assert.Equal(t, float64(3), retention["keep_last"])
 }
 

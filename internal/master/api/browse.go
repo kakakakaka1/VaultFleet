@@ -54,13 +54,13 @@ func (h *BrowseHandler) BrowseAgent(c *gin.Context) {
 		return
 	}
 	if h.Hub == nil || !h.Hub.IsOnline(agentID) {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "agent offline"})
+		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
 		return
 	}
 
 	var request browseAgentRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		writeErrorResponse(c, http.StatusBadRequest, "invalid request")
 		return
 	}
 	if request.Depth <= 0 || request.Depth > 3 {
@@ -72,7 +72,7 @@ func (h *BrowseHandler) BrowseAgent(c *gin.Context) {
 		Depth: request.Depth,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "encode browse request"})
+		writeErrorResponse(c, http.StatusInternalServerError, "encode browse request")
 		return
 	}
 
@@ -81,29 +81,29 @@ func (h *BrowseHandler) BrowseAgent(c *gin.Context) {
 		wait = h.Hub.SendAndWait
 	}
 	if wait == nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "agent offline"})
+		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
 		return
 	}
 	respCh, err := wait(agentID, *msg, h.timeout)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "agent offline"})
+		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
 		return
 	}
 
 	select {
 	case resp, ok := <-respCh:
 		if !ok {
-			c.JSON(http.StatusGatewayTimeout, gin.H{"error": "timeout waiting for agent response"})
+			writeErrorResponse(c, http.StatusGatewayTimeout, "timeout waiting for agent response")
 			return
 		}
 		payload, err := protocol.ParsePayload[protocol.DirBrowseRespPayload](&resp)
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "invalid agent response"})
+			writeErrorResponse(c, http.StatusBadGateway, "invalid agent response")
 			return
 		}
-		c.JSON(http.StatusOK, payload)
+		writeDataResponse(c, http.StatusOK, payload)
 	case <-c.Request.Context().Done():
-		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "request cancelled"})
+		writeErrorResponse(c, http.StatusGatewayTimeout, "request cancelled")
 	}
 }
 
@@ -111,10 +111,10 @@ func (h *BrowseHandler) agentExists(c *gin.Context, agentID string) bool {
 	var agent db.Agent
 	if err := h.DB.DB.First(&agent, "id = ?", agentID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+			writeErrorResponse(c, http.StatusNotFound, "agent not found")
 			return false
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		writeErrorResponse(c, http.StatusInternalServerError, "database error")
 		return false
 	}
 	return true

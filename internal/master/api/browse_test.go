@@ -53,8 +53,13 @@ func TestBrowseAgentHappyRelay(t *testing.T) {
 	})
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	raw := parseJSON(t, w)
+	assert.Equal(t, true, raw["ok"])
+	data, err := json.Marshal(raw["data"])
+	require.NoError(t, err)
 	var body protocol.DirBrowseRespPayload
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.NoError(t, json.Unmarshal(data, &body))
+	assert.Equal(t, "/etc", raw["path"])
 	assert.Equal(t, "/etc", body.Path)
 	assert.Equal(t, []protocol.DirEntry{{Path: "/etc/nginx.conf", Type: "file", Size: 10}}, body.Entries)
 }
@@ -70,6 +75,7 @@ func TestBrowseAgentOffline(t *testing.T) {
 
 	require.Equal(t, http.StatusBadGateway, w.Code)
 	body := parseJSON(t, w)
+	assert.Equal(t, false, body["ok"])
 	assert.Equal(t, "agent offline", body["error"])
 }
 

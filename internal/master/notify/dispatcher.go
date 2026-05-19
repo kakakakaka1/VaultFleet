@@ -124,7 +124,7 @@ func (d *Dispatcher) send(parent context.Context, notifier Notifier, configID st
 func (d *Dispatcher) notificationForEvent(event events.Event) (NotifyMessage, string, bool) {
 	switch event.Type {
 	case events.AgentOffline:
-		agentName := payloadAgentName(event.Payload)
+		agentName := d.displayAgentName(payloadAgentName(event.Payload))
 		if agentName == "" {
 			return NotifyMessage{}, "", false
 		}
@@ -145,7 +145,7 @@ func (d *Dispatcher) notificationForEvent(event events.Event) (NotifyMessage, st
 }
 
 func (d *Dispatcher) directBackupFailedMessage(payload any) (NotifyMessage, string, bool) {
-	agentName := payloadAgentName(payload)
+	agentName := d.displayAgentName(payloadAgentName(payload))
 	if agentName == "" {
 		agentName = "unknown"
 	}
@@ -178,9 +178,9 @@ func (d *Dispatcher) backupFailedMessage(payload any) (NotifyMessage, string, bo
 		return NotifyMessage{}, "", false
 	}
 
-	agentName := result.AgentID
+	agentName := d.displayAgentName(result.AgentID)
 	if agentName == "" {
-		agentName = fallbackAgentID
+		agentName = d.displayAgentName(fallbackAgentID)
 	}
 	body := result.ErrorLog
 	if body == "" {
@@ -198,6 +198,21 @@ func (d *Dispatcher) backupFailedMessage(payload any) (NotifyMessage, string, bo
 		AgentName: agentName,
 		Timestamp: timestamp.UTC(),
 	}, EventBackupFailed, true
+}
+
+func (d *Dispatcher) displayAgentName(agentIDOrName string) string {
+	if strings.TrimSpace(agentIDOrName) == "" {
+		return ""
+	}
+	if d == nil || d.db == nil || d.db.DB == nil {
+		return agentIDOrName
+	}
+
+	var agent db.Agent
+	if err := d.db.DB.First(&agent, "id = ?", agentIDOrName).Error; err == nil && agent.Name != "" {
+		return agent.Name
+	}
+	return agentIDOrName
 }
 
 func NewNotifierFromConfig(notificationType string, raw json.RawMessage) (Notifier, error) {

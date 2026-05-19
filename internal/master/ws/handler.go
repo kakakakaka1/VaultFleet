@@ -21,7 +21,6 @@ type AgentAuthFunc func(token string) (agentID string, err error)
 type PolicyLookupFunc func(agentID string) (*protocol.Message, bool)
 type TaskResultProcessorFunc func(agentID string, msg protocol.Message) error
 type PolicyAckProcessorFunc func(agentID string, msg protocol.Message) error
-
 type Handler struct {
 	hub                *Hub
 	eventBus           *events.Bus
@@ -29,6 +28,7 @@ type Handler struct {
 	policyLookup       PolicyLookupFunc
 	taskResultProcess  TaskResultProcessorFunc
 	PolicyAckProcessor PolicyAckProcessorFunc
+	AgentStateUpdater  func(agentID string, status string, lastSeenAt *time.Time) error
 	upgrader           websocket.Upgrader
 }
 
@@ -80,6 +80,9 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 
 	safeConn := NewSafeConn(conn)
 	h.hub.Add(agentID, safeConn)
+	now := timeNow()
+	h.hub.UpdateLastSeen(agentID, now)
+	h.updateAgentState(agentID, "online", &now)
 	defer h.cleanupConnection(agentID, safeConn)
 	h.eventBus.Publish(events.Event{Type: events.AgentOnline, Payload: agentID})
 
@@ -96,6 +99,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 
 func (h *Handler) cleanupConnection(agentID string, conn *SafeConn) {
 	if h.hub.RemoveIfCurrent(agentID, conn) {
+		h.updateAgentState(agentID, "offline", nil)
 		h.eventBus.Publish(events.Event{Type: events.AgentOffline, Payload: agentID})
 	}
 }
@@ -123,6 +127,7 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 		now := timeNow()
 		h.hub.UpdateLastSeen(agentID, now)
 		h.hub.MarkOnline(agentID)
+		h.updateAgentState(agentID, "online", &now)
 	case protocol.TypePolicyAck:
 		if h.PolicyAckProcessor != nil {
 			if err := h.PolicyAckProcessor(agentID, msg); err != nil {
@@ -152,5 +157,14 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 		})
 	case protocol.TypeDirBrowseResp, protocol.TypeSnapshotListResp:
 		h.hub.HandleResponse(agentID, msg)
+	}
+}
+
+func (h *Handler) updateAgentState(agentID string, status string, lastSeenAt *time.Time) {
+	if h.AgentStateUpdater == nil {
+		return
+	}
+	if err := h.AgentStateUpdater(agentID, status, lastSeenAt); err != nil {
+		log.Printf("update agent %s state failed: %v", agentID, err)
 	}
 }

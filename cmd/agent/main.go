@@ -95,6 +95,7 @@ func runClient(ctx context.Context, cfg *AgentConfig) error {
 		},
 	})
 	client = connect.NewClient(cfg.Server, cfg.AgentToken, handler.Handle)
+	client.SetOnConnect(handler.FlushPendingResults)
 
 	go connect.RunHeartbeat(ctx, client, connect.DefaultSystemInfoCollector, 0)
 	client.Run(ctx)

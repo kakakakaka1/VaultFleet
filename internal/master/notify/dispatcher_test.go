@@ -94,6 +94,7 @@ func TestNewNotifierFromConfigRejectsUnknownFieldsInvalidHeadersAndWebhookURL(t 
 
 func TestDispatcherSendsAgentOfflineNotificationsForMatchingConfigs(t *testing.T) {
 	database := setupNotifyTestDB(t)
+	agent := createNotifyAgent(t, database, "agent-1", "Debian-AMD64")
 	bus := events.NewBus()
 	notifier := &recordingNotifier{}
 	dispatcher := NewDispatcher(database, bus, WithNotifierFactory(func(notificationType string, raw json.RawMessage) (Notifier, error) {
@@ -109,13 +110,14 @@ func TestDispatcherSendsAgentOfflineNotificationsForMatchingConfigs(t *testing.T
 	msg := requireRecordedMessage(t, notifier)
 	assert.Equal(t, "Agent Offline", msg.Title)
 	assert.Equal(t, LevelWarning, msg.Level)
-	assert.Equal(t, "agent-1", msg.AgentName)
-	assert.Contains(t, msg.Body, "agent-1")
+	assert.Equal(t, agent.Name, msg.AgentName)
+	assert.Contains(t, msg.Body, agent.Name)
 	assert.False(t, msg.Timestamp.IsZero())
 }
 
 func TestDispatcherDerivesBackupFailedFromFailedBackupTaskResult(t *testing.T) {
 	database := setupNotifyTestDB(t)
+	agent := createNotifyAgent(t, database, "agent-from-result", "Debian-AMD64")
 	bus := events.NewBus()
 	notifier := &recordingNotifier{}
 	dispatcher := NewDispatcher(database, bus, WithNotifierFactory(func(string, json.RawMessage) (Notifier, error) {
@@ -142,7 +144,7 @@ func TestDispatcherDerivesBackupFailedFromFailedBackupTaskResult(t *testing.T) {
 	msg := requireRecordedMessage(t, notifier)
 	assert.Equal(t, "Backup Failed", msg.Title)
 	assert.Equal(t, LevelError, msg.Level)
-	assert.Equal(t, "agent-from-result", msg.AgentName)
+	assert.Equal(t, agent.Name, msg.AgentName)
 	assert.Contains(t, msg.Body, "repository locked")
 }
 
@@ -324,6 +326,14 @@ func createNotifyConfig(t *testing.T, database *db.Database, notificationType, c
 	}
 	require.NoError(t, database.DB.Create(&notificationConfig).Error)
 	return notificationConfig
+}
+
+func createNotifyAgent(t *testing.T, database *db.Database, id, name string) db.Agent {
+	t.Helper()
+
+	agent := db.Agent{ID: id, Name: name, Status: "online"}
+	require.NoError(t, database.DB.Create(&agent).Error)
+	return agent
 }
 
 type recordingNotifier struct {

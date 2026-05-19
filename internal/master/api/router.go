@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ type RouterHub interface {
 	BrowseHub
 	SnapshotHub
 	RestoreHub
+	CommandHub
 }
 
 type RouterConfig struct {
@@ -103,6 +105,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	browseHandler := NewBrowseHandler(cfg.Database, cfg.Hub)
 	snapshotHandler := NewSnapshotHandler(cfg.Database, cfg.Hub)
 	restoreHandler := NewRestoreHandler(cfg.Database, cfg.Hub)
+	taskHandler := NewTaskHandler(cfg.Database, cfg.Hub)
 	notificationHandler := NewNotificationHandler(cfg.Database)
 	systemHandler := NewSystemHandler(cfg.Database)
 
@@ -130,9 +133,11 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	RegisterBrowseRoutes(protected, browseHandler)
 	RegisterSnapshotRoutes(protected, snapshotHandler)
 	RegisterRestoreRoutes(protected, restoreHandler)
+	RegisterTaskRoutes(protected, taskHandler)
 	RegisterNotificationRoutes(protected, notificationHandler)
 	RegisterSystemRoutes(protected.Group("/system"), systemHandler)
 
+	RegisterDownloadRoutes(r, cfg.Database.DataDir)
 	RegisterFrontendRoutes(r)
 
 	return r
@@ -236,6 +241,8 @@ func policyPushPayload(database *db.Database, policy db.BackupPolicy, storage db
 	if err != nil {
 		return protocol.PolicyPushPayload{}, err
 	}
+	repoPath := policyRepoPath(storage.RcloneType, rcloneConfig, policy.RepoPath)
+	rcloneConfig = storageRcloneConfig(storage.RcloneType, rcloneConfig)
 
 	var backupDirs []string
 	if err := json.Unmarshal([]byte(policy.BackupDirs), &backupDirs); err != nil {
@@ -259,7 +266,7 @@ func policyPushPayload(database *db.Database, policy db.BackupPolicy, storage db
 		Storage: protocol.StorageConfig{
 			RcloneType:   storage.RcloneType,
 			RcloneConfig: rcloneConfig,
-			RepoPath:     policy.RepoPath,
+			RepoPath:     repoPath,
 		},
 		ResticPassword:  resticPassword,
 		BackupDirs:      backupDirs,
@@ -289,4 +296,29 @@ func decryptPolicyRcloneConfig(database *db.Database, rawConfig string) (map[str
 		return nil, fmt.Errorf("rclone config %q must be a string", key)
 	}
 	return values, nil
+}
+
+func policyRepoPath(rcloneType string, rcloneConfig map[string]string, repoPath string) string {
+	if rcloneType != "s3" {
+		return repoPath
+	}
+	bucket := rcloneConfig["bucket"]
+	if bucket == "" {
+		return repoPath
+	}
+	return strings.Trim(bucket, "/") + "/" + strings.TrimLeft(repoPath, "/")
+}
+
+func storageRcloneConfig(rcloneType string, rcloneConfig map[string]string) map[string]string {
+	if rcloneType != "s3" {
+		return rcloneConfig
+	}
+	values := make(map[string]string, len(rcloneConfig))
+	for key, value := range rcloneConfig {
+		if key == "bucket" {
+			continue
+		}
+		values[key] = value
+	}
+	return values
 }

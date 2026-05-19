@@ -139,6 +139,39 @@ func TestHandler_HeartbeatDispatchUpdatesLastSeen(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestHandlerConnectionUpdatesAgentDatabaseState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := db.Agent{Name: "Tokyo-1", AgentToken: "ak_valid", Status: "offline"}
+	require.NoError(t, database.DB.Create(&agent).Error)
+
+	hub := NewHub()
+	bus := events.NewBus()
+	handler := NewHandler(
+		hub,
+		bus,
+		masterapi.AuthenticateAgentByToken(database),
+		noPolicy,
+		nil,
+	)
+	handler.AgentStateUpdater = masterapi.NewAgentStateUpdater(database)
+	router := gin.New()
+	router.GET("/ws", handler.HandleWebSocket)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial(websocketURL(server.URL, "/ws", url.Values{"token": []string{"ak_valid"}}), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.Eventually(t, func() bool {
+		var stored db.Agent
+		require.NoError(t, database.DB.First(&stored, "id = ?", agent.ID).Error)
+		return stored.Status == "online" && stored.LastSeenAt != nil
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestHandler_HeartbeatDispatchMarksAgentOnline(t *testing.T) {
 	setup := setupHandlerTest(t, validTestAuth, noPolicy)
 	setup.hub.Add("agent-1", &SafeConn{})

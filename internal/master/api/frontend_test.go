@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFrontendPlaceholderRoot(t *testing.T) {
+func TestFrontendRootServesAcceptanceConsole(t *testing.T) {
 	router := newFrontendPlaceholderTestRouter()
 
 	w := getFrontendPlaceholder(t, router, "/")
@@ -18,19 +18,60 @@ func TestFrontendPlaceholderRoot(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
 	assert.Contains(t, w.Body.String(), "VaultFleet")
+	assert.Contains(t, w.Body.String(), `name="username"`)
+	assert.Contains(t, w.Body.String(), `name="password"`)
+	assert.Contains(t, w.Body.String(), "Nodes")
+	assert.Contains(t, w.Body.String(), "Backup Now")
+	assert.Contains(t, w.Body.String(), "Browse Files")
 }
 
-func TestFrontendPlaceholderPaths(t *testing.T) {
+func TestFrontendDoesNotPrefetchProtectedAPIsBeforeAuth(t *testing.T) {
 	router := newFrontendPlaceholderTestRouter()
 
-	for _, path := range []string{"/", "/dashboard", "/agents", "/settings"} {
+	w := getFrontendPlaceholder(t, router, "/")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `if (!state.initialized) {`)
+	assert.Contains(t, w.Body.String(), `if (!auth.authenticated) { showAuth(); return; }`)
+	assert.Contains(t, w.Body.String(), `$("auth-mode").textContent = "Login";`)
+}
+
+func TestFrontendAcceptancePaths(t *testing.T) {
+	router := newFrontendPlaceholderTestRouter()
+
+	for _, path := range []string{"/", "/dashboard", "/nodes", "/nodes/agent-1", "/settings"} {
 		t.Run(path, func(t *testing.T) {
 			w := getFrontendPlaceholder(t, router, path)
 
 			require.Equal(t, http.StatusOK, w.Code)
 			assert.Contains(t, w.Body.String(), "VaultFleet")
+			assert.Contains(t, w.Body.String(), "app-root")
 		})
 	}
+}
+
+func TestFrontendLoadsNodeDetailFromAcceptancePath(t *testing.T) {
+	router := newFrontendPlaceholderTestRouter()
+
+	w := getFrontendPlaceholder(t, router, "/nodes/agent-1")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "function routeAgentID()")
+	assert.Contains(t, w.Body.String(), `window.location.pathname`)
+	assert.Contains(t, w.Body.String(), `state.currentAgentId = routeAgentID()`)
+	assert.Contains(t, w.Body.String(), `history.pushState`)
+}
+
+func TestFrontendRendersClickableFileBrowserEntries(t *testing.T) {
+	router := newFrontendPlaceholderTestRouter()
+
+	w := getFrontendPlaceholder(t, router, "/nodes/agent-1")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "function renderBrowse")
+	assert.Contains(t, w.Body.String(), `data-browse-path`)
+	assert.Contains(t, w.Body.String(), `entry.type === "dir"`)
+	assert.Contains(t, w.Body.String(), `document.querySelectorAll("[data-browse-path]")`)
 }
 
 func TestFrontendPlaceholderDoesNotServeBackendRoutes(t *testing.T) {

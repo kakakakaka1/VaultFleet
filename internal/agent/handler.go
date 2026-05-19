@@ -519,6 +519,47 @@ func (h *Handler) sendTaskResultWithID(messageID string, payload protocol.TaskRe
 	}
 }
 
+func (h *Handler) FlushPendingResults() {
+	if h.policyStore == nil {
+		return
+	}
+	results, err := h.policyStore.LoadPendingResults()
+	if err != nil {
+		log.Printf("load pending results failed: %v", err)
+		return
+	}
+	if len(results) == 0 {
+		return
+	}
+
+	remaining := make([]policy.PendingTaskResult, 0)
+	for _, result := range results {
+		msg, err := protocol.NewMessage(protocol.TypeTaskResult, result.Payload)
+		if err != nil {
+			log.Printf("create pending task result failed: %v", err)
+			remaining = append(remaining, result)
+			continue
+		}
+		if result.MessageID != "" {
+			msg.ID = result.MessageID
+		}
+		if err := h.sendMessage(*msg); err != nil {
+			log.Printf("send pending task result failed: %v", err)
+			remaining = append(remaining, result)
+		}
+	}
+
+	if len(remaining) == 0 {
+		if err := h.policyStore.ClearPendingResults(); err != nil {
+			log.Printf("clear pending results failed: %v", err)
+		}
+		return
+	}
+	if err := h.policyStore.SavePendingResults(remaining); err != nil {
+		log.Printf("save remaining pending results failed: %v", err)
+	}
+}
+
 func (h *Handler) sendMessage(msg protocol.Message) error {
 	if h.send == nil {
 		return nil

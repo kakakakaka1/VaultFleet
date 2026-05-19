@@ -3,6 +3,7 @@ package executor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -54,7 +55,7 @@ func TestGenerateRcloneConfWebDAVContent(t *testing.T) {
 			"url":    "https://dav.example.test/remote.php/dav/files/user",
 			"vendor": "nextcloud",
 			"user":   "user@example.test",
-			"pass":   "encrypted-pass",
+			"pass":   "clear-webdav-password",
 		},
 	}
 
@@ -70,7 +71,6 @@ func TestGenerateRcloneConfWebDAVContent(t *testing.T) {
 	for _, want := range []string{
 		"[vaultfleet]\n",
 		"type = webdav\n",
-		"pass = encrypted-pass\n",
 		"url = https://dav.example.test/remote.php/dav/files/user\n",
 		"user = user@example.test\n",
 		"vendor = nextcloud\n",
@@ -79,6 +79,31 @@ func TestGenerateRcloneConfWebDAVContent(t *testing.T) {
 			t.Fatalf("generated config missing %q in:\n%s", want, string(got))
 		}
 	}
+
+	passValue := configValue(t, string(got), "pass")
+	if passValue == "clear-webdav-password" {
+		t.Fatalf("webdav pass was written in clear text")
+	}
+	revealed, err := revealRcloneObscured(passValue)
+	if err != nil {
+		t.Fatalf("reveal generated webdav pass: %v", err)
+	}
+	if revealed != "clear-webdav-password" {
+		t.Fatalf("revealed pass = %q, want original secret", revealed)
+	}
+}
+
+func configValue(t *testing.T, content string, key string) string {
+	t.Helper()
+
+	prefix := key + " = "
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix)
+		}
+	}
+	t.Fatalf("config missing %q line in:\n%s", key, content)
+	return ""
 }
 
 func containsLine(content, line string) bool {

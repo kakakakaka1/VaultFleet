@@ -29,6 +29,7 @@ type Client struct {
 	serverURL string
 	token     string
 	handler   MessageHandler
+	onConnect func()
 
 	mu      sync.RWMutex
 	conn    *websocket.Conn
@@ -41,6 +42,10 @@ func NewClient(serverURL, token string, handler MessageHandler) *Client {
 		token:     token,
 		handler:   handler,
 	}
+}
+
+func (c *Client) SetOnConnect(fn func()) {
+	c.onConnect = fn
 }
 
 func (c *Client) Run(ctx context.Context) {
@@ -95,6 +100,9 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 
 	c.setConn(conn)
+	if c.onConnect != nil {
+		c.onConnect()
+	}
 	return nil
 }
 
