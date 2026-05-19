@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -24,6 +26,66 @@ type RouterConfig struct {
 	EventBus       *events.Bus
 	AgentWebSocket gin.HandlerFunc
 }
+
+type PolicyPushTracker struct {
+	mu     sync.Mutex
+	pushes map[string]trackedPolicyPush
+}
+
+type trackedPolicyPush struct {
+	AgentID   string
+	PolicyID  string
+	UpdatedAt time.Time
+}
+
+func NewPolicyPushTracker() *PolicyPushTracker {
+	return &PolicyPushTracker{
+		pushes: make(map[string]trackedPolicyPush),
+	}
+}
+
+func (t *PolicyPushTracker) Track(messageID string, agentID string, policyID string, updatedAt time.Time) {
+	if t == nil || messageID == "" || agentID == "" || policyID == "" {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.pushes[messageID] = trackedPolicyPush{
+		AgentID:   agentID,
+		PolicyID:  policyID,
+		UpdatedAt: updatedAt,
+	}
+}
+
+func (t *PolicyPushTracker) Get(messageID string, agentID string) (trackedPolicyPush, bool) {
+	if t == nil || messageID == "" || agentID == "" {
+		return trackedPolicyPush{}, false
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	tracked, ok := t.pushes[messageID]
+	if !ok || tracked.AgentID != agentID {
+		return trackedPolicyPush{}, false
+	}
+	return tracked, true
+}
+
+func (t *PolicyPushTracker) Delete(messageID string) {
+	if t == nil || messageID == "" {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.pushes, messageID)
+}
+
+var defaultPolicyPushTracker = NewPolicyPushTracker()
 
 func NewRouter(cfg RouterConfig) *gin.Engine {
 	if cfg.Database == nil || cfg.Database.DB == nil {
@@ -87,6 +149,10 @@ func AuthenticateAgentByToken(database *db.Database) func(token string) (string,
 }
 
 func CurrentPolicyLookup(database *db.Database) func(agentID string) (*protocol.Message, bool) {
+	return CurrentPolicyLookupWithTracker(database, defaultPolicyPushTracker)
+}
+
+func CurrentPolicyLookupWithTracker(database *db.Database, tracker *PolicyPushTracker) func(agentID string) (*protocol.Message, bool) {
 	return func(agentID string) (*protocol.Message, bool) {
 		var policy db.BackupPolicy
 		if err := database.DB.
@@ -110,29 +176,36 @@ func CurrentPolicyLookup(database *db.Database) func(agentID string) (*protocol.
 		if err != nil {
 			return nil, false
 		}
+		tracker.Track(msg.ID, policy.AgentID, policy.ID, policy.UpdatedAt)
 		return msg, true
 	}
 }
 
 func NewPolicyAckProcessor(database *db.Database) func(agentID string, msg protocol.Message) error {
+	return NewPolicyAckProcessorWithTracker(database, defaultPolicyPushTracker)
+}
+
+func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPushTracker) func(agentID string, msg protocol.Message) error {
 	return func(agentID string, msg protocol.Message) error {
 		ack, err := protocol.ParsePayload[protocol.PolicyAckPayload](&msg)
 		if err != nil {
 			return err
 		}
+		tracked, ok := tracker.Get(msg.ID, agentID)
+		if !ok {
+			return nil
+		}
 		if !ack.Success {
 			return nil
 		}
 
-		var policy db.BackupPolicy
-		if err := database.DB.
-			Where("agent_id = ? AND synced = ?", agentID, false).
-			Order("updated_at DESC").
-			First(&policy).Error; err != nil {
-			return nil
+		err = database.DB.Model(&db.BackupPolicy{}).
+			Where("id = ? AND agent_id = ? AND synced = ? AND updated_at = ?", tracked.PolicyID, tracked.AgentID, false, tracked.UpdatedAt).
+			Update("synced", true).Error
+		if err == nil {
+			tracker.Delete(msg.ID)
 		}
-
-		return database.DB.Model(&policy).Update("synced", true).Error
+		return err
 	}
 }
 

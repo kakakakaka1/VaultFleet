@@ -221,9 +221,12 @@ func TestPolicyAckProcessorSuccessfulAckMarksNewestUnsyncedPolicySynced(t *testi
 	require.NoError(t, database.DB.Model(&older).Update("updated_at", time.Now().Add(-time.Hour)).Error)
 	require.NoError(t, database.DB.Model(&newer).Update("updated_at", time.Now()).Error)
 
-	msg := policyAckMessage(t, protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
+	tracker := NewPolicyPushTracker()
+	pushed, ok := CurrentPolicyLookupWithTracker(database, tracker)(agent.ID)
+	require.True(t, ok)
+	msg := policyAckMessageWithID(t, pushed.ID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
 
-	require.NoError(t, NewPolicyAckProcessor(database)(agent.ID, *msg))
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker)(agent.ID, *msg))
 
 	var storedOlder db.BackupPolicy
 	require.NoError(t, database.DB.First(&storedOlder, "id = ?", older.ID).Error)
@@ -233,18 +236,81 @@ func TestPolicyAckProcessorSuccessfulAckMarksNewestUnsyncedPolicySynced(t *testi
 	assert.True(t, storedNewer.Synced)
 }
 
+func TestPolicyAckProcessorSuccessfulOldAckDoesNotMarkNewerPolicySynced(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policyA := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+
+	tracker := NewPolicyPushTracker()
+	msgA, ok := CurrentPolicyLookupWithTracker(database, tracker)(agent.ID)
+	require.True(t, ok)
+	require.NotNil(t, msgA)
+
+	policyB := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	require.NoError(t, database.DB.Model(&policyB).Update("updated_at", time.Now()).Error)
+
+	ack := policyAckMessageWithID(t, msgA.ID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
+
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker)(agent.ID, *ack))
+
+	var storedA db.BackupPolicy
+	require.NoError(t, database.DB.First(&storedA, "id = ?", policyA.ID).Error)
+	assert.True(t, storedA.Synced)
+	var storedB db.BackupPolicy
+	require.NoError(t, database.DB.First(&storedB, "id = ?", policyB.ID).Error)
+	assert.False(t, storedB.Synced)
+}
+
+func TestPolicyAckProcessorUnknownMessageIDMarksNoPolicySynced(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	tracker := NewPolicyPushTracker()
+
+	ack := policyAckMessageWithID(t, "unknown-policy-push-message-id", protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
+
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker)(agent.ID, *ack))
+
+	var stored db.BackupPolicy
+	require.NoError(t, database.DB.First(&stored, "id = ?", policy.ID).Error)
+	assert.False(t, stored.Synced)
+}
+
 func TestPolicyAckProcessorFailedAckLeavesUnsyncedPolicyUnsynced(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
 	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
 
-	msg := policyAckMessage(t, protocol.PolicyAckPayload{AgentID: agent.ID, Success: false, Error: "rejected"})
+	tracker := NewPolicyPushTracker()
+	pushed, ok := CurrentPolicyLookupWithTracker(database, tracker)(agent.ID)
+	require.True(t, ok)
+	msg := policyAckMessageWithID(t, pushed.ID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: false, Error: "rejected"})
 
-	require.NoError(t, NewPolicyAckProcessor(database)(agent.ID, *msg))
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker)(agent.ID, *msg))
 
 	var stored db.BackupPolicy
 	require.NoError(t, database.DB.First(&stored, "id = ?", policy.ID).Error)
 	assert.False(t, stored.Synced)
+}
+
+func TestPolicyAckProcessorFailedAckDoesNotConsumeTrackedPush(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+
+	tracker := NewPolicyPushTracker()
+	pushed, ok := CurrentPolicyLookupWithTracker(database, tracker)(agent.ID)
+	require.True(t, ok)
+
+	failed := policyAckMessageWithID(t, pushed.ID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: false, Error: "temporary"})
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker)(agent.ID, *failed))
+
+	success := policyAckMessageWithID(t, pushed.ID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker)(agent.ID, *success))
+
+	var stored db.BackupPolicy
+	require.NoError(t, database.DB.First(&stored, "id = ?", policy.ID).Error)
+	assert.True(t, stored.Synced)
 }
 
 func TestPolicyAckProcessorUsesAuthenticatedAgentIDOverPayloadAgentID(t *testing.T) {
@@ -254,9 +320,12 @@ func TestPolicyAckProcessorUsesAuthenticatedAgentIDOverPayloadAgentID(t *testing
 	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
 	otherPolicy := createStorageTestPolicy(t, database, otherAgent.ID, storage.ID, false)
 
-	msg := policyAckMessage(t, protocol.PolicyAckPayload{AgentID: otherAgent.ID, Success: true})
+	tracker := NewPolicyPushTracker()
+	pushed, ok := CurrentPolicyLookupWithTracker(database, tracker)(agent.ID)
+	require.True(t, ok)
+	msg := policyAckMessageWithID(t, pushed.ID, protocol.PolicyAckPayload{AgentID: otherAgent.ID, Success: true})
 
-	require.NoError(t, NewPolicyAckProcessor(database)(agent.ID, *msg))
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker)(agent.ID, *msg))
 
 	var stored db.BackupPolicy
 	require.NoError(t, database.DB.First(&stored, "id = ?", policy.ID).Error)
@@ -342,11 +411,17 @@ func createRouterAssemblyPolicyFixtures(t *testing.T, database *db.Database) (db
 func policyAckMessage(t *testing.T, payload protocol.PolicyAckPayload) *protocol.Message {
 	t.Helper()
 
+	return policyAckMessageWithID(t, "policy-push-message-id", payload)
+}
+
+func policyAckMessageWithID(t *testing.T, messageID string, payload protocol.PolicyAckPayload) *protocol.Message {
+	t.Helper()
+
 	raw, err := json.Marshal(payload)
 	require.NoError(t, err)
 	return &protocol.Message{
 		Type:    protocol.TypePolicyAck,
-		ID:      "policy-push-message-id",
+		ID:      messageID,
 		Payload: raw,
 	}
 }
