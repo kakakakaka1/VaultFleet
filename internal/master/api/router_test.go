@@ -428,6 +428,11 @@ func TestPolicyChangedPusherCreatesNewCommandForUpdatedPolicyVersion(t *testing.
 		Count(&commandCount).Error)
 	assert.Equal(t, int64(2), commandCount)
 
+	var retiredFirst db.AgentCommand
+	require.NoError(t, database.DB.First(&retiredFirst, "id = ?", first.ID).Error)
+	assert.Equal(t, commands.CommandStatusFailed, retiredFirst.Status)
+	assert.Contains(t, retiredFirst.ErrorMessage, "superseded")
+
 	var second db.AgentCommand
 	require.NoError(t, database.DB.Where("agent_id = ? AND type = ? AND policy_id = ? AND policy_updated_at = ?", agent.ID, protocol.TypePolicyPush, policy.ID, newVersion).
 		First(&second).Error)
@@ -646,7 +651,7 @@ func TestPolicyAckProcessorFailedAckLeavesUnsyncedPolicyUnsynced(t *testing.T) {
 	assert.False(t, stored.Synced)
 }
 
-func TestPolicyAckProcessorFailedAckDoesNotConsumeTrackedPush(t *testing.T) {
+func TestPolicyAckProcessorFailedAckConsumesTrackedPush(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
 	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
@@ -663,7 +668,7 @@ func TestPolicyAckProcessorFailedAckDoesNotConsumeTrackedPush(t *testing.T) {
 
 	var stored db.BackupPolicy
 	require.NoError(t, database.DB.First(&stored, "id = ?", policy.ID).Error)
-	assert.True(t, stored.Synced)
+	assert.False(t, stored.Synced)
 }
 
 func TestPolicyAckProcessorUsesAuthenticatedAgentIDOverPayloadAgentID(t *testing.T) {

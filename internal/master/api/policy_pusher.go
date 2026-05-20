@@ -82,6 +82,7 @@ func (p *PolicyChangedPusher) EnsureDurableCommand(ctx context.Context, agentID 
 	if p.hasActivePolicyPushCommand(agentID, current.PolicyID, current.StorageID, current.PolicyUpdatedAt) {
 		return true
 	}
+	p.retireSupersededPolicyPushCommands(agentID, current.PolicyID, current.StorageID, current.PolicyUpdatedAt)
 	if _, err := p.Commands.CreateCommand(ctx, commands.CreateCommandInput{
 		AgentID:         agentID,
 		Type:            protocol.TypePolicyPush,
@@ -94,6 +95,30 @@ func (p *PolicyChangedPusher) EnsureDurableCommand(ctx context.Context, agentID 
 		return false
 	}
 	return true
+}
+
+func (p *PolicyChangedPusher) retireSupersededPolicyPushCommands(agentID string, policyID string, storageID string, policyUpdatedAt time.Time) {
+	if p == nil || p.DB == nil || p.DB.DB == nil || agentID == "" || policyID == "" || storageID == "" || policyUpdatedAt.IsZero() {
+		return
+	}
+	result := p.DB.DB.Model(&db.AgentCommand{}).
+		Where(
+			"agent_id = ? AND type = ? AND policy_id = ? AND storage_id = ? AND status IN ? AND (policy_updated_at IS NULL OR policy_updated_at <> ?)",
+			agentID,
+			protocol.TypePolicyPush,
+			policyID,
+			storageID,
+			[]string{commands.CommandStatusPending, commands.CommandStatusDispatched, commands.CommandStatusRunning},
+			policyUpdatedAt,
+		).
+		Updates(map[string]any{
+			"status":        commands.CommandStatusFailed,
+			"error_message": "superseded by newer policy version",
+			"completed_at":  time.Now(),
+		})
+	if result.Error != nil {
+		log.Printf("retire superseded policy commands for agent %s failed: %v", agentID, result.Error)
+	}
 }
 
 func (p *PolicyChangedPusher) lookupCommand(agentID string) (*CurrentPolicyCommand, bool) {

@@ -259,6 +259,7 @@ func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPush
 			return completerErr
 		}
 		if !ack.Success {
+			tracker.Delete(msg.ID)
 			return completerErr
 		}
 
