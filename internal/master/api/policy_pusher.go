@@ -83,11 +83,12 @@ func (p *PolicyChangedPusher) EnsureDurableCommand(ctx context.Context, agentID 
 		return true
 	}
 	if _, err := p.Commands.CreateCommand(ctx, commands.CreateCommandInput{
-		AgentID:   agentID,
-		Type:      protocol.TypePolicyPush,
-		Message:   *current.Message,
-		PolicyID:  current.PolicyID,
-		StorageID: current.StorageID,
+		AgentID:         agentID,
+		Type:            protocol.TypePolicyPush,
+		Message:         *current.Message,
+		PolicyID:        current.PolicyID,
+		PolicyUpdatedAt: &current.PolicyUpdatedAt,
+		StorageID:       current.StorageID,
 	}); err != nil {
 		log.Printf("create policy command for agent %s failed: %v", agentID, err)
 		return false

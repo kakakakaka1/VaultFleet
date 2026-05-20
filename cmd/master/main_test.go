@@ -125,6 +125,48 @@ func TestRuntimeReconnectPolicyPushIsDurableAndNotDuplicated(t *testing.T) {
 	require.True(t, errors.As(err, &netErr) && netErr.Timeout(), "expected read timeout without duplicate policy_push, got %v", err)
 }
 
+func TestRuntimePolicyAckAfterTrackerRestartMarksPolicySynced(t *testing.T) {
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := db.Agent{Name: "Restart Agent", AgentToken: "restart-token", Status: "offline"}
+	require.NoError(t, database.DB.Create(&agent).Error)
+	storage := db.StorageConfig{
+		Name:         "Restart Storage",
+		RcloneType:   "s3",
+		RcloneConfig: encryptMasterTestMap(t, database, `{"provider":"Cloudflare","access_key_id":"AKID","secret_access_key":"SECRET"}`),
+	}
+	require.NoError(t, database.DB.Create(&storage).Error)
+	policy := createMasterTestPolicy(t, database, agent.ID, storage.ID)
+
+	firstRuntime := buildRuntime(context.Background(), database)
+	require.True(t, firstRuntime.policyPusher.EnsureDurableCommand(context.Background(), agent.ID))
+
+	var pending db.AgentCommand
+	require.NoError(t, database.DB.First(&pending, "agent_id = ? AND type = ? AND policy_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID).Error)
+	require.Equal(t, commands.CommandStatusPending, pending.Status)
+
+	restartedRuntime := buildRuntime(context.Background(), database)
+	server := httptest.NewServer(restartedRuntime.router)
+	t.Cleanup(server.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial(masterWebSocketURL(server.URL, "restart-token"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	var pushed protocol.Message
+	require.NoError(t, conn.ReadJSON(&pushed))
+	require.Equal(t, pending.MessageID, pushed.ID)
+	require.NoError(t, conn.WriteJSON(masterPolicyAckMessage(t, pushed.ID, agent.ID)))
+
+	require.Eventually(t, func() bool {
+		var command db.AgentCommand
+		require.NoError(t, database.DB.First(&command, "id = ?", pending.ID).Error)
+		var storedPolicy db.BackupPolicy
+		require.NoError(t, database.DB.First(&storedPolicy, "id = ?", policy.ID).Error)
+		return command.Status == commands.CommandStatusSucceeded && storedPolicy.Synced
+	}, time.Second, 10*time.Millisecond)
+}
+
 func masterWebSocketURL(serverURL string, token string) string {
 	u, err := url.Parse(serverURL)
 	if err != nil {

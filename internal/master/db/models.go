@@ -79,22 +79,23 @@ func (b *BackupPolicy) BeforeCreate(tx *gorm.DB) error {
 }
 
 type AgentCommand struct {
-	ID           string     `gorm:"type:text;primaryKey" json:"id"`
-	AgentID      string     `gorm:"type:text;index;not null" json:"agent_id"`
-	Type         string     `gorm:"type:text;index;not null" json:"type"`
-	Status       string     `gorm:"type:text;index;not null" json:"status"`
-	MessageID    string     `gorm:"type:text;uniqueIndex;not null" json:"message_id"`
-	Payload      string     `gorm:"type:text" json:"-"`
-	Result       string     `gorm:"type:text" json:"result,omitempty"`
-	ErrorMessage string     `gorm:"type:text" json:"error_message,omitempty"`
-	Attempts     int        `json:"attempts"`
-	PolicyID     string     `gorm:"type:text;index" json:"policy_id,omitempty"`
-	StorageID    string     `gorm:"type:text;index" json:"storage_id,omitempty"`
-	DeadlineAt   *time.Time `json:"deadline_at"`
-	DispatchedAt *time.Time `json:"dispatched_at"`
-	CompletedAt  *time.Time `json:"completed_at"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID              string     `gorm:"type:text;primaryKey" json:"id"`
+	AgentID         string     `gorm:"type:text;index;not null" json:"agent_id"`
+	Type            string     `gorm:"type:text;index;not null" json:"type"`
+	Status          string     `gorm:"type:text;index;not null" json:"status"`
+	MessageID       string     `gorm:"type:text;uniqueIndex;not null" json:"message_id"`
+	Payload         string     `gorm:"type:text" json:"-"`
+	Result          string     `gorm:"type:text" json:"result,omitempty"`
+	ErrorMessage    string     `gorm:"type:text" json:"error_message,omitempty"`
+	Attempts        int        `json:"attempts"`
+	PolicyID        string     `gorm:"type:text;index" json:"policy_id,omitempty"`
+	PolicyUpdatedAt *time.Time `gorm:"index" json:"policy_updated_at,omitempty"`
+	StorageID       string     `gorm:"type:text;index" json:"storage_id,omitempty"`
+	DeadlineAt      *time.Time `json:"deadline_at"`
+	DispatchedAt    *time.Time `json:"dispatched_at"`
+	CompletedAt     *time.Time `json:"completed_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 func (c *AgentCommand) BeforeCreate(tx *gorm.DB) error {

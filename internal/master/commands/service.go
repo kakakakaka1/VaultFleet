@@ -43,14 +43,15 @@ type Service struct {
 var dispatchMu sync.Mutex
 
 type CreateCommandInput struct {
-	AgentID    string
-	Type       string
-	Message    protocol.Message
-	TaskType   string
-	TaskState  string
-	SnapshotID string
-	PolicyID   string
-	StorageID  string
+	AgentID         string
+	Type            string
+	Message         protocol.Message
+	TaskType        string
+	TaskState       string
+	SnapshotID      string
+	PolicyID        string
+	PolicyUpdatedAt *time.Time
+	StorageID       string
 }
 
 func NewService(database *db.Database, hub Hub) *Service {
@@ -89,14 +90,15 @@ func (s *Service) CreateCommand(ctx context.Context, input CreateCommandInput) (
 
 	deadline := DeadlineForType(input.Type, s.now())
 	command := db.AgentCommand{
-		AgentID:    input.AgentID,
-		Type:       input.Type,
-		Status:     CommandStatusPending,
-		MessageID:  input.Message.ID,
-		Payload:    encrypted,
-		PolicyID:   input.PolicyID,
-		StorageID:  input.StorageID,
-		DeadlineAt: &deadline,
+		AgentID:         input.AgentID,
+		Type:            input.Type,
+		Status:          CommandStatusPending,
+		MessageID:       input.Message.ID,
+		Payload:         encrypted,
+		PolicyID:        input.PolicyID,
+		PolicyUpdatedAt: input.PolicyUpdatedAt,
+		StorageID:       input.StorageID,
+		DeadlineAt:      &deadline,
 	}
 
 	err = s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -188,10 +190,36 @@ func (s *Service) CompletePolicyAck(ctx context.Context, agentID string, message
 		updates["error_message"] = errorText
 	}
 
-	return s.DB.DB.WithContext(ctx).
-		Model(&db.AgentCommand{}).
-		Where("agent_id = ? AND message_id = ? AND type = ?", agentID, messageID, protocol.TypePolicyPush).
-		Updates(updates).Error
+	return s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&db.AgentCommand{}).
+			Where(
+				"agent_id = ? AND message_id = ? AND type = ? AND status IN ?",
+				agentID,
+				messageID,
+				protocol.TypePolicyPush,
+				[]string{CommandStatusPending, CommandStatusDispatched, CommandStatusRunning},
+			).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			return nil
+		}
+
+		var command db.AgentCommand
+		err := tx.First(&command, "agent_id = ? AND message_id = ? AND type = ?", agentID, messageID, protocol.TypePolicyPush).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("policy command not found: %s", messageID)
+		}
+		if err != nil {
+			return err
+		}
+		if isTerminal(command.Status) {
+			return nil
+		}
+		return fmt.Errorf("policy command %s is not active: %s", messageID, command.Status)
+	})
 }
 
 func (s *Service) messageFromCommand(command db.AgentCommand) (protocol.Message, error) {
@@ -277,4 +305,8 @@ func (s *Service) now() time.Time {
 
 func isLongRunning(commandType string) bool {
 	return commandType == protocol.TypeBackupNow || commandType == protocol.TypeRestoreReq
+}
+
+func isTerminal(status string) bool {
+	return status == CommandStatusSucceeded || status == CommandStatusFailed || status == CommandStatusTimeout
 }

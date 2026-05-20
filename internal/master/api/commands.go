@@ -20,21 +20,22 @@ type CommandHandler struct {
 }
 
 type commandResponse struct {
-	ID           string     `json:"id"`
-	AgentID      string     `json:"agent_id"`
-	Type         string     `json:"type"`
-	Status       string     `json:"status"`
-	MessageID    string     `json:"message_id"`
-	Result       string     `json:"result,omitempty"`
-	ErrorMessage string     `json:"error_message,omitempty"`
-	Attempts     int        `json:"attempts"`
-	PolicyID     string     `json:"policy_id,omitempty"`
-	StorageID    string     `json:"storage_id,omitempty"`
-	DeadlineAt   *time.Time `json:"deadline_at"`
-	DispatchedAt *time.Time `json:"dispatched_at"`
-	CompletedAt  *time.Time `json:"completed_at"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID              string     `json:"id"`
+	AgentID         string     `json:"agent_id"`
+	Type            string     `json:"type"`
+	Status          string     `json:"status"`
+	MessageID       string     `json:"message_id"`
+	Result          string     `json:"result,omitempty"`
+	ErrorMessage    string     `json:"error_message,omitempty"`
+	Attempts        int        `json:"attempts"`
+	PolicyID        string     `json:"policy_id,omitempty"`
+	PolicyUpdatedAt *time.Time `json:"policy_updated_at,omitempty"`
+	StorageID       string     `json:"storage_id,omitempty"`
+	DeadlineAt      *time.Time `json:"deadline_at"`
+	DispatchedAt    *time.Time `json:"dispatched_at"`
+	CompletedAt     *time.Time `json:"completed_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 func NewCommandHandler(database *db.Database) *CommandHandler {
@@ -106,20 +107,21 @@ func parseCommandLimit(raw string) int {
 
 func newCommandResponse(command db.AgentCommand) commandResponse {
 	return commandResponse{
-		ID:           command.ID,
-		AgentID:      command.AgentID,
-		Type:         command.Type,
-		Status:       command.Status,
-		MessageID:    command.MessageID,
-		Result:       command.Result,
-		ErrorMessage: command.ErrorMessage,
-		Attempts:     command.Attempts,
-		PolicyID:     command.PolicyID,
-		StorageID:    command.StorageID,
-		DeadlineAt:   command.DeadlineAt,
-		DispatchedAt: command.DispatchedAt,
-		CompletedAt:  command.CompletedAt,
-		CreatedAt:    command.CreatedAt,
-		UpdatedAt:    command.UpdatedAt,
+		ID:              command.ID,
+		AgentID:         command.AgentID,
+		Type:            command.Type,
+		Status:          command.Status,
+		MessageID:       command.MessageID,
+		Result:          command.Result,
+		ErrorMessage:    command.ErrorMessage,
+		Attempts:        command.Attempts,
+		PolicyID:        command.PolicyID,
+		PolicyUpdatedAt: command.PolicyUpdatedAt,
+		StorageID:       command.StorageID,
+		DeadlineAt:      command.DeadlineAt,
+		DispatchedAt:    command.DispatchedAt,
+		CompletedAt:     command.CompletedAt,
+		CreatedAt:       command.CreatedAt,
+		UpdatedAt:       command.UpdatedAt,
 	}
 }

@@ -518,6 +518,30 @@ func TestPolicyAckProcessorCompleterErrorDoesNotBlockPolicySync(t *testing.T) {
 	assert.True(t, stored.Synced)
 }
 
+func TestPolicyAckProcessorUsesDurableCommandWhenTrackerIsEmpty(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
+	trackerBeforeRestart := NewPolicyPushTracker()
+	commandService := commands.NewService(database, hub)
+	pusher := NewPolicyChangedPusher(database, hub, nil)
+	pusher.CommandLookup = CurrentPolicyCommandLookupWithTracker(database, trackerBeforeRestart)
+	pusher.Commands = commandService
+	require.True(t, pusher.EnsureDurableCommand(context.Background(), agent.ID))
+
+	var command db.AgentCommand
+	require.NoError(t, database.DB.First(&command, "agent_id = ? AND type = ? AND policy_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID).Error)
+	emptyTrackerAfterRestart := NewPolicyPushTracker()
+	ack := policyAckMessageWithID(t, command.MessageID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
+
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, emptyTrackerAfterRestart, commandService)(agent.ID, *ack))
+
+	var stored db.BackupPolicy
+	require.NoError(t, database.DB.First(&stored, "id = ?", policy.ID).Error)
+	assert.True(t, stored.Synced)
+}
+
 func TestPolicyAckProcessorSuccessfulOldAckDoesNotMarkNewerPolicySynced(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent, storage := createRouterAssemblyPolicyFixtures(t, database)

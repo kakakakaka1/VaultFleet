@@ -253,6 +253,9 @@ func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPush
 		}
 		tracked, ok := tracker.Get(msg.ID, agentID)
 		if !ok {
+			tracked, ok = durableTrackedPolicyPush(database, agentID, msg.ID)
+		}
+		if !ok {
 			return completerErr
 		}
 		if !ack.Success {
@@ -268,6 +271,24 @@ func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPush
 		}
 		return err
 	}
+}
+
+func durableTrackedPolicyPush(database *db.Database, agentID string, messageID string) (trackedPolicyPush, bool) {
+	if database == nil || database.DB == nil || agentID == "" || messageID == "" {
+		return trackedPolicyPush{}, false
+	}
+	var command db.AgentCommand
+	if err := database.DB.First(&command, "agent_id = ? AND message_id = ? AND type = ?", agentID, messageID, protocol.TypePolicyPush).Error; err != nil {
+		return trackedPolicyPush{}, false
+	}
+	if command.PolicyID == "" || command.PolicyUpdatedAt == nil {
+		return trackedPolicyPush{}, false
+	}
+	return trackedPolicyPush{
+		AgentID:   command.AgentID,
+		PolicyID:  command.PolicyID,
+		UpdatedAt: *command.PolicyUpdatedAt,
+	}, true
 }
 
 func unavailableAgentWebSocket(database *db.Database) gin.HandlerFunc {
