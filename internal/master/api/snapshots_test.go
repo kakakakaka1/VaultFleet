@@ -513,6 +513,8 @@ func TestRefreshSnapshots(t *testing.T) {
 	var command db.AgentCommand
 	require.NoError(t, setup.database.DB.First(&command, "agent_id = ? AND type = ?", agent.ID, protocol.TypeSnapshotListReq).Error)
 	assert.Equal(t, commands.CommandStatusSucceeded, command.Status)
+	assert.Equal(t, 1, command.Attempts)
+	assert.NotNil(t, command.DispatchedAt)
 	assert.Contains(t, command.Result, `"snap-1"`)
 	assert.Empty(t, command.ErrorMessage)
 	assert.NotNil(t, command.CompletedAt)
@@ -705,9 +707,60 @@ func TestRefreshSnapshotsSendAndWaitFailureLeavesCommandQueued(t *testing.T) {
 	assert.Equal(t, agent.ID, command.AgentID)
 	assert.Equal(t, protocol.TypeSnapshotListReq, command.Type)
 	assert.Equal(t, commands.CommandStatusPending, command.Status)
+	assert.Equal(t, 1, command.Attempts)
+	assert.Nil(t, command.DispatchedAt)
+	assert.Contains(t, command.ErrorMessage, "connection lost")
 	assert.Equal(t, messageID, command.MessageID)
-	assert.Empty(t, command.ErrorMessage)
 	assert.Nil(t, command.CompletedAt)
+}
+
+func TestRefreshSnapshotsRecordsDispatchBeforeWaitingForResponse(t *testing.T) {
+	setup := setupSnapshotAPI(t)
+	agent := createSnapshotTestAgent(t, setup.database, "online")
+	setup.hub.online[agent.ID] = true
+	respCh := make(chan protocol.Message)
+	sentMessageID := make(chan string, 1)
+	setup.hub.sendAndWait = func(agentID string, msg protocol.Message, timeout time.Duration) (<-chan protocol.Message, error) {
+		assert.Equal(t, agent.ID, agentID)
+		assert.Equal(t, protocol.TypeSnapshotListReq, msg.Type)
+		sentMessageID <- msg.ID
+		return respCh, nil
+	}
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/snapshots/refresh", map[string]any{})
+	}()
+
+	var messageID string
+	require.Eventually(t, func() bool {
+		select {
+		case messageID = <-sentMessageID:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		var command db.AgentCommand
+		if err := setup.database.DB.First(&command, "agent_id = ? AND message_id = ?", agent.ID, messageID).Error; err != nil {
+			return false
+		}
+		return command.Status == commands.CommandStatusDispatched &&
+			command.Attempts == 1 &&
+			command.DispatchedAt != nil &&
+			command.ErrorMessage == ""
+	}, time.Second, 10*time.Millisecond)
+
+	resp, err := protocol.NewMessage(protocol.TypeSnapshotListResp, protocol.SnapshotListRespPayload{AgentID: agent.ID})
+	require.NoError(t, err)
+	resp.ID = messageID
+	respCh <- *resp
+	close(respCh)
+
+	w := <-done
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 }
 
 func TestRefreshSnapshotsTimeout(t *testing.T) {
@@ -776,6 +829,128 @@ func TestSnapshotListResponseProcessorDoesNotPersistSnapshotsForTerminalCommand(
 	assert.Equal(t, "command timeout", found.ErrorMessage)
 	require.NotNil(t, found.CompletedAt)
 	assert.True(t, found.CompletedAt.Equal(completedAt))
+}
+
+func TestTaskResultProcessorDoesNotCompleteWrongCommandType(t *testing.T) {
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := createSnapshotTestAgent(t, database, "online")
+	service := commands.NewService(database, nil)
+	msg, err := protocol.NewMessage(protocol.TypePolicyPush, protocol.PolicyPushPayload{AgentID: agent.ID})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), commands.CreateCommandInput{
+		AgentID: agent.ID,
+		Type:    protocol.TypePolicyPush,
+		Message: *msg,
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Update("status", commands.CommandStatusDispatched).Error)
+	resultMsg, err := protocol.NewMessage(protocol.TypeTaskResult, protocol.TaskResultPayload{
+		AgentID:    agent.ID,
+		TaskType:   "backup",
+		Status:     "success",
+		SnapshotID: "snap-wrong-command-type",
+		Snapshots: []protocol.SnapshotInfo{
+			{ID: "snap-wrong-command-type", Time: time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC), Paths: []string{"/srv"}, Size: 1024},
+		},
+	})
+	require.NoError(t, err)
+	resultMsg.ID = msg.ID
+
+	processor := NewTaskResultProcessor(database, service)
+	require.NoError(t, processor(agent.ID, *resultMsg))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, commands.CommandStatusDispatched, found.Status)
+	assert.Empty(t, found.Result)
+	assert.Nil(t, found.CompletedAt)
+
+	var snapshotCount int64
+	require.NoError(t, database.DB.Model(&db.Snapshot{}).
+		Where("agent_id = ? AND snapshot_id = ?", agent.ID, "snap-wrong-command-type").
+		Count(&snapshotCount).Error)
+	assert.Equal(t, int64(0), snapshotCount)
+}
+
+func TestTaskResultProcessorDoesNotCompleteMismatchedTaskType(t *testing.T) {
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := createSnapshotTestAgent(t, database, "online")
+	service := commands.NewService(database, nil)
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: agent.ID})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), commands.CreateCommandInput{
+		AgentID:   agent.ID,
+		Type:      protocol.TypeBackupNow,
+		Message:   *msg,
+		TaskType:  "backup",
+		TaskState: commands.TaskStatusRunning,
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Update("status", commands.CommandStatusRunning).Error)
+	resultMsg, err := protocol.NewMessage(protocol.TypeTaskResult, protocol.TaskResultPayload{
+		AgentID:    agent.ID,
+		TaskType:   "restore",
+		Status:     "success",
+		SnapshotID: "snap-mismatched-task",
+	})
+	require.NoError(t, err)
+	resultMsg.ID = msg.ID
+
+	processor := NewTaskResultProcessor(database, service)
+	require.NoError(t, processor(agent.ID, *resultMsg))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, commands.CommandStatusRunning, found.Status)
+	assert.Empty(t, found.Result)
+	assert.Nil(t, found.CompletedAt)
+
+	var history db.TaskHistory
+	require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, commands.TaskStatusRunning, history.Status)
+	assert.Empty(t, history.SnapshotID)
+	assert.Nil(t, history.FinishedAt)
+}
+
+func TestSnapshotListResponseProcessorErrorDoesNotFailWrongCommandType(t *testing.T) {
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := createSnapshotTestAgent(t, database, "online")
+	service := commands.NewService(database, nil)
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: agent.ID})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), commands.CreateCommandInput{
+		AgentID:   agent.ID,
+		Type:      protocol.TypeBackupNow,
+		Message:   *msg,
+		TaskType:  "backup",
+		TaskState: commands.TaskStatusRunning,
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Update("status", commands.CommandStatusRunning).Error)
+	response, err := protocol.NewMessage(protocol.TypeSnapshotListResp, protocol.SnapshotListRespPayload{
+		AgentID: agent.ID,
+		Error:   "repository unavailable",
+	})
+	require.NoError(t, err)
+	response.ID = msg.ID
+
+	processor := NewSnapshotListResponseProcessor(database, service)
+	require.NoError(t, processor(agent.ID, *response))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, commands.CommandStatusRunning, found.Status)
+	assert.Empty(t, found.ErrorMessage)
+	assert.Nil(t, found.CompletedAt)
 }
 
 func TestRefreshSnapshotsClosedWaiterUsesDetachedContext(t *testing.T) {

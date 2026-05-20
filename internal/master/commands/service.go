@@ -269,13 +269,24 @@ func (s *Service) CompleteTaskResultWith(ctx context.Context, agentID string, me
 	err = s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var command db.AgentCommand
 		err := tx.
-			Where("agent_id = ? AND message_id = ? AND status NOT IN ?", agentID, messageID, terminalStatuses()).
+			Where(
+				"agent_id = ? AND message_id = ? AND type IN ? AND status NOT IN ?",
+				agentID,
+				messageID,
+				[]string{protocol.TypeBackupNow, protocol.TypeRestoreReq},
+				terminalStatuses(),
+			).
 			First(&command).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
 		if err != nil {
 			return err
+		}
+
+		expectedTaskType, ok := taskTypeForCommand(command.Type)
+		if !ok || result.TaskType != expectedTaskType {
+			return nil
 		}
 
 		if apply != nil {
@@ -395,14 +406,18 @@ func (s *Service) CompleteSnapshotListWith(ctx context.Context, agentID string, 
 }
 
 func (s *Service) FailCommand(ctx context.Context, agentID string, messageID string, errorText string) error {
-	return s.completeCommand(ctx, agentID, messageID, CommandStatusFailed, nil, errorText)
+	return s.completeCommand(ctx, agentID, messageID, "", CommandStatusFailed, nil, errorText)
+}
+
+func (s *Service) FailCommandOfType(ctx context.Context, agentID string, messageID string, commandType string, errorText string) error {
+	return s.completeCommand(ctx, agentID, messageID, commandType, CommandStatusFailed, nil, errorText)
 }
 
 func (s *Service) TimeoutCommand(ctx context.Context, agentID string, messageID string) error {
-	return s.completeCommand(ctx, agentID, messageID, CommandStatusTimeout, nil, "command timeout")
+	return s.completeCommand(ctx, agentID, messageID, "", CommandStatusTimeout, nil, "command timeout")
 }
 
-func (s *Service) completeCommand(ctx context.Context, agentID string, messageID string, status string, result any, errorText string) error {
+func (s *Service) completeCommand(ctx context.Context, agentID string, messageID string, commandType string, status string, result any, errorText string) error {
 	if s == nil || s.DB == nil || s.DB.DB == nil || messageID == "" {
 		return nil
 	}
@@ -426,6 +441,9 @@ func (s *Service) completeCommand(ctx context.Context, agentID string, messageID
 		Where("message_id = ? AND status NOT IN ?", messageID, terminalStatuses())
 	if agentID != "" {
 		query = query.Where("agent_id = ?", agentID)
+	}
+	if commandType != "" {
+		query = query.Where("type = ?", commandType)
 	}
 	return query.Updates(updates).Error
 }
@@ -524,49 +542,110 @@ func (s *Service) dispatch(ctx context.Context, command db.AgentCommand) error {
 	if err != nil {
 		return err
 	}
-	if err := s.Hub.Send(command.AgentID, message); err != nil {
-		return s.recordDispatchFailure(ctx, command, err)
+	dispatched, err := s.recordDispatchSuccessForCommand(ctx, command)
+	if err != nil || !dispatched {
+		return err
 	}
+	if err := s.Hub.Send(command.AgentID, message); err != nil {
+		return s.rollbackDispatchFailure(ctx, command, err)
+	}
+	return nil
+}
 
+func (s *Service) RecordDispatchSuccess(ctx context.Context, commandID string) error {
+	command, ok, err := s.findCommandByID(ctx, commandID)
+	if err != nil || !ok {
+		return err
+	}
+	_, err = s.recordDispatchSuccessForCommand(ctx, command)
+	return err
+}
+
+func (s *Service) RecordDispatchFailure(ctx context.Context, commandID string, dispatchErr error) error {
+	command, ok, err := s.findCommandByID(ctx, commandID)
+	if err != nil || !ok {
+		return err
+	}
+	return s.recordDispatchFailure(ctx, command, dispatchErr, true)
+}
+
+func (s *Service) findCommandByID(ctx context.Context, commandID string) (db.AgentCommand, bool, error) {
+	if s == nil || s.DB == nil || s.DB.DB == nil || commandID == "" {
+		return db.AgentCommand{}, false, nil
+	}
+	var command db.AgentCommand
+	err := s.DB.DB.WithContext(ctx).First(&command, "id = ?", commandID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return db.AgentCommand{}, false, nil
+	}
+	if err != nil {
+		return db.AgentCommand{}, false, err
+	}
+	return command, true, nil
+}
+
+func (s *Service) recordDispatchSuccessForCommand(ctx context.Context, command db.AgentCommand) (bool, error) {
+	if s == nil || s.DB == nil || s.DB.DB == nil {
+		return false, nil
+	}
 	now := s.now()
 	status := CommandStatusDispatched
 	if isLongRunning(command.Type) {
 		status = CommandStatusRunning
 	}
-
-	return s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&db.AgentCommand{}).
+	var rows int64
+	err := s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&db.AgentCommand{}).
 			Where("id = ? AND status NOT IN ?", command.ID, terminalStatuses()).
 			Updates(map[string]any{
 				"attempts":      gorm.Expr("attempts + ?", 1),
 				"dispatched_at": &now,
 				"error_message": "",
 				"status":        status,
-			}).Error; err != nil {
-			return err
+				"updated_at":    now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		rows = result.RowsAffected
+		if rows == 0 {
+			return nil
 		}
 		if !isLongRunning(command.Type) {
 			return nil
 		}
 		return tx.Model(&db.TaskHistory{}).
 			Where("command_id = ? AND status = ?", command.ID, TaskStatusPending).
-			Update("status", TaskStatusRunning).Error
+			Updates(map[string]any{
+				"status":     TaskStatusRunning,
+				"updated_at": now,
+			}).Error
 	})
+	return rows > 0, err
 }
 
-func (s *Service) recordDispatchFailure(ctx context.Context, command db.AgentCommand, dispatchErr error) error {
+func (s *Service) rollbackDispatchFailure(ctx context.Context, command db.AgentCommand, dispatchErr error) error {
+	return s.recordDispatchFailure(ctx, command, dispatchErr, false)
+}
+
+func (s *Service) recordDispatchFailure(ctx context.Context, command db.AgentCommand, dispatchErr error, incrementAttempt bool) error {
 	if s == nil || s.DB == nil || s.DB.DB == nil {
 		return nil
+	}
+	now := s.now()
+	updates := map[string]any{
+		"dispatched_at": nil,
+		"error_message": dispatchErr.Error(),
+		"status":        CommandStatusPending,
+		"updated_at":    now,
+	}
+	if incrementAttempt {
+		updates["attempts"] = gorm.Expr("attempts + ?", 1)
 	}
 	return s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&db.AgentCommand{}).
 			Where("id = ? AND status NOT IN ?", command.ID, terminalStatuses()).
-			Updates(map[string]any{
-				"attempts":      gorm.Expr("attempts + ?", 1),
-				"dispatched_at": nil,
-				"error_message": dispatchErr.Error(),
-				"status":        CommandStatusPending,
-			})
+			Updates(updates)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -578,7 +657,10 @@ func (s *Service) recordDispatchFailure(ctx context.Context, command db.AgentCom
 		}
 		return tx.Model(&db.TaskHistory{}).
 			Where("command_id = ? AND status = ?", command.ID, TaskStatusRunning).
-			Update("status", TaskStatusPending).Error
+			Updates(map[string]any{
+				"status":     TaskStatusPending,
+				"updated_at": now,
+			}).Error
 	})
 }
 
@@ -591,6 +673,17 @@ func (s *Service) now() time.Time {
 
 func isLongRunning(commandType string) bool {
 	return commandType == protocol.TypeBackupNow || commandType == protocol.TypeRestoreReq
+}
+
+func taskTypeForCommand(commandType string) (string, bool) {
+	switch commandType {
+	case protocol.TypeBackupNow:
+		return "backup", true
+	case protocol.TypeRestoreReq:
+		return "restore", true
+	default:
+		return "", false
+	}
 }
 
 func isTerminal(status string) bool {

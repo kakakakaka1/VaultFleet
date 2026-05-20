@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -515,16 +514,6 @@ func writeBareErrorResponse(c *gin.Context, status int, message string) {
 
 const redactedSecretValue = "[redacted]"
 
-var rcloneSecretKeys = map[string]bool{
-	"secret":            true,
-	"secret_access_key": true,
-	"access_key_id":     true,
-	"password":          true,
-	"pass":              true,
-	"token":             true,
-	"client_secret":     true,
-}
-
 func redactRcloneConfig(config map[string]any) map[string]any {
 	redacted := make(map[string]any, len(config))
 	for key, value := range config {
@@ -539,5 +528,5 @@ func redactRcloneConfig(config map[string]any) map[string]any {
 }
 
 func isRcloneSecretKey(key string) bool {
-	return rcloneSecretKeys[strings.ToLower(key)]
+	return storagecheck.IsSecretConfigKey(key)
 }

@@ -261,7 +261,7 @@ func secretValuesByLength(config map[string]string) []string {
 	values := make([]string, 0, len(config))
 	seen := make(map[string]bool, len(config))
 	for key, value := range config {
-		if value == "" || !isSecretKey(key) {
+		if value == "" || !IsSecretConfigKey(key) {
 			continue
 		}
 		if seen[value] {
@@ -276,7 +276,7 @@ func secretValuesByLength(config map[string]string) []string {
 	return values
 }
 
-func isSecretKey(key string) bool {
+func IsSecretConfigKey(key string) bool {
 	normalized := strings.ToLower(key)
 	return normalized == "pass" ||
 		strings.Contains(normalized, "secret") ||

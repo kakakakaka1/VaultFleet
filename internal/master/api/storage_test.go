@@ -160,6 +160,10 @@ func TestStorageResponsesRedactSecretFields(t *testing.T) {
 		"pass":              "pass-value",
 		"token":             "token-value",
 		"client_secret":     "client-secret-value",
+		"api_key":           "api-key-value",
+		"private_key":       "private-key-value",
+		"key_pem":           "key-pem-value",
+		"custom_key":        "custom-key-value",
 		"endpoint":          "https://example.r2.cloudflarestorage.com",
 	})
 	id := created["id"].(string)
@@ -170,7 +174,7 @@ func TestStorageResponsesRedactSecretFields(t *testing.T) {
 	config := requireMap(t, body["rclone_config"])
 	assert.Equal(t, "Cloudflare", config["provider"])
 	assert.Equal(t, "https://example.r2.cloudflarestorage.com", config["endpoint"])
-	for _, key := range []string{"access_key_id", "secret_access_key", "secret", "password", "pass", "token", "client_secret"} {
+	for _, key := range []string{"access_key_id", "secret_access_key", "secret", "password", "pass", "token", "client_secret", "api_key", "private_key", "key_pem", "custom_key"} {
 		assert.Equal(t, redactedSecretValue, config[key], key)
 	}
 
@@ -181,6 +185,10 @@ func TestStorageResponsesRedactSecretFields(t *testing.T) {
 	require.Len(t, list, 1)
 	listConfig := requireMap(t, requireMap(t, list[0])["rclone_config"])
 	assert.Equal(t, redactedSecretValue, listConfig["secret_access_key"])
+	assert.Equal(t, redactedSecretValue, listConfig["api_key"])
+	assert.Equal(t, redactedSecretValue, listConfig["private_key"])
+	assert.Equal(t, redactedSecretValue, listConfig["key_pem"])
+	assert.Equal(t, redactedSecretValue, listConfig["custom_key"])
 	assert.Equal(t, "Cloudflare", listConfig["provider"])
 
 	var stored db.StorageConfig

@@ -156,12 +156,14 @@ func TestRestoreRecordsPendingCommandAndTaskBeforeSendingMessage(t *testing.T) {
 		var history db.TaskHistory
 		require.NoError(t, setup.database.DB.First(&history, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-1").Error)
 		assert.Equal(t, "restore", history.Type)
-		assert.Equal(t, commands.TaskStatusPending, history.Status)
+		assert.Equal(t, commands.TaskStatusRunning, history.Status)
 
 		var command db.AgentCommand
 		require.NoError(t, setup.database.DB.First(&command, "id = ?", history.CommandID).Error)
 		assert.Equal(t, protocol.TypeRestoreReq, command.Type)
-		assert.Equal(t, commands.CommandStatusPending, command.Status)
+		assert.Equal(t, commands.CommandStatusRunning, command.Status)
+		assert.Equal(t, 1, command.Attempts)
+		assert.NotNil(t, command.DispatchedAt)
 	}
 
 	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/restore", map[string]any{

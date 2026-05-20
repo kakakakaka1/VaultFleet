@@ -130,13 +130,13 @@ func assertConcurrentDispatchSendsLongCommandAtMostOnce(
 
 	var duringSend db.AgentCommand
 	if assert.NoError(t, database.DB.First(&duringSend, "id = ?", command.ID).Error) {
-		assert.Equal(t, CommandStatusPending, duringSend.Status)
-		assert.Equal(t, 0, duringSend.Attempts)
-		assert.Nil(t, duringSend.DispatchedAt)
+		assert.Equal(t, CommandStatusRunning, duringSend.Status)
+		assert.Equal(t, 1, duringSend.Attempts)
+		assert.NotNil(t, duringSend.DispatchedAt)
 	}
 	var historyDuringSend db.TaskHistory
 	if assert.NoError(t, database.DB.First(&historyDuringSend, "command_id = ?", command.ID).Error) {
-		assert.Equal(t, TaskStatusPending, historyDuringSend.Status)
+		assert.Equal(t, TaskStatusRunning, historyDuringSend.Status)
 	}
 
 	secondErr := make(chan error, 1)
@@ -202,6 +202,102 @@ func TestDispatchPendingRecordsSendFailure(t *testing.T) {
 	assert.Equal(t, 1, found.Attempts)
 	assert.Nil(t, found.DispatchedAt)
 	assert.Contains(t, found.ErrorMessage, "write failed")
+}
+
+func TestDispatchPendingRecordsActiveStateBeforeSend(t *testing.T) {
+	tests := []struct {
+		name           string
+		commandType    string
+		expectedStatus string
+		expectedTask   string
+	}{
+		{
+			name:           "long running",
+			commandType:    protocol.TypeBackupNow,
+			expectedStatus: CommandStatusRunning,
+			expectedTask:   TaskStatusRunning,
+		},
+		{
+			name:           "short command",
+			commandType:    protocol.TypePolicyPush,
+			expectedStatus: CommandStatusDispatched,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := setupCommandTestDB(t)
+			service := NewService(database, nil)
+			var command db.AgentCommand
+			if tt.commandType == protocol.TypePolicyPush {
+				command = createPolicyPushCommandForTest(t, service, "agent-1")
+			} else {
+				command = createCommandForTest(t, service, "agent-1", tt.commandType)
+			}
+			hub := &inspectingHub{
+				online: map[string]bool{"agent-1": true},
+				onSend: func(t *testing.T, message protocol.Message) {
+					t.Helper()
+
+					var duringSend db.AgentCommand
+					require.NoError(t, database.DB.First(&duringSend, "id = ?", command.ID).Error)
+					assert.Equal(t, tt.expectedStatus, duringSend.Status)
+					assert.Equal(t, 1, duringSend.Attempts)
+					assert.NotNil(t, duringSend.DispatchedAt)
+					assert.Empty(t, duringSend.ErrorMessage)
+
+					if tt.expectedTask != "" {
+						var history db.TaskHistory
+						require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+						assert.Equal(t, tt.expectedTask, history.Status)
+					}
+				},
+				t: t,
+			}
+			service.Hub = hub
+
+			require.NoError(t, service.DispatchPendingForAgent(context.Background(), "agent-1", 10))
+			require.Len(t, hub.sent, 1)
+		})
+	}
+}
+
+func TestDispatchPendingSendFailureRollsBackPreDispatchStateWithoutExtraAttempt(t *testing.T) {
+	database := setupCommandTestDB(t)
+	service := NewService(database, nil)
+	command := createCommandForTest(t, service, "agent-1", protocol.TypeBackupNow)
+	hub := &inspectingHub{
+		online: map[string]bool{"agent-1": true},
+		err:    errors.New("write failed"),
+		onSend: func(t *testing.T, message protocol.Message) {
+			t.Helper()
+
+			var duringSend db.AgentCommand
+			require.NoError(t, database.DB.First(&duringSend, "id = ?", command.ID).Error)
+			assert.Equal(t, CommandStatusRunning, duringSend.Status)
+			assert.Equal(t, 1, duringSend.Attempts)
+			assert.NotNil(t, duringSend.DispatchedAt)
+
+			var history db.TaskHistory
+			require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+			assert.Equal(t, TaskStatusRunning, history.Status)
+		},
+		t: t,
+	}
+	service.Hub = hub
+
+	require.NoError(t, service.DispatchPendingForAgent(context.Background(), "agent-1", 10))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, CommandStatusPending, found.Status)
+	assert.Equal(t, 1, found.Attempts)
+	assert.Nil(t, found.DispatchedAt)
+	assert.Contains(t, found.ErrorMessage, "write failed")
+
+	var history db.TaskHistory
+	require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, TaskStatusPending, history.Status)
 }
 
 func TestCompletePolicyAckMarksCommandSucceeded(t *testing.T) {
@@ -660,6 +756,33 @@ func (h *recordingHub) Send(agentID string, msg interface{}) error {
 	message, ok := msg.(protocol.Message)
 	if !ok {
 		return errors.New("message is not protocol.Message")
+	}
+	h.sent = append(h.sent, message)
+	return nil
+}
+
+type inspectingHub struct {
+	online map[string]bool
+	err    error
+	sent   []protocol.Message
+	onSend func(*testing.T, protocol.Message)
+	t      *testing.T
+}
+
+func (h *inspectingHub) IsOnline(agentID string) bool {
+	return h.online[agentID]
+}
+
+func (h *inspectingHub) Send(agentID string, msg interface{}) error {
+	message, ok := msg.(protocol.Message)
+	if !ok {
+		return errors.New("message is not protocol.Message")
+	}
+	if h.onSend != nil {
+		h.onSend(h.t, message)
+	}
+	if h.err != nil {
+		return h.err
 	}
 	h.sent = append(h.sent, message)
 	return nil
