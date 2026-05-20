@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -347,6 +349,24 @@ func TestPolicyAckProcessorCompletesPolicyPushCommand(t *testing.T) {
 	assert.True(t, policy.Synced)
 }
 
+func TestPolicyAckProcessorCompleterErrorDoesNotBlockPolicySync(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	tracker := NewPolicyPushTracker()
+	pushed, ok := CurrentPolicyLookupWithTracker(database, tracker)(agent.ID)
+	require.True(t, ok)
+	ack := policyAckMessageWithID(t, pushed.ID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
+	completerErr := errors.New("command completion unavailable")
+
+	err := NewPolicyAckProcessorWithTracker(database, tracker, failingPolicyCommandCompleter{err: completerErr})(agent.ID, *ack)
+
+	require.ErrorIs(t, err, completerErr)
+	var stored db.BackupPolicy
+	require.NoError(t, database.DB.First(&stored, "id = ?", policy.ID).Error)
+	assert.True(t, stored.Synced)
+}
+
 func TestPolicyAckProcessorSuccessfulOldAckDoesNotMarkNewerPolicySynced(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
@@ -449,6 +469,14 @@ func TestPolicyAckProcessorUsesAuthenticatedAgentIDOverPayloadAgentID(t *testing
 type routerAssemblySetup struct {
 	database *db.Database
 	router   *gin.Engine
+}
+
+type failingPolicyCommandCompleter struct {
+	err error
+}
+
+func (c failingPolicyCommandCompleter) CompletePolicyAck(context.Context, string, string, bool, string) error {
+	return c.err
 }
 
 func setupRouterAssembly(t *testing.T) routerAssemblySetup {

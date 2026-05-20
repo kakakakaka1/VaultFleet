@@ -215,17 +215,16 @@ func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPush
 		if err != nil {
 			return err
 		}
+		var completerErr error
 		if len(completer) > 0 && completer[0] != nil {
-			if err := completer[0].CompletePolicyAck(context.Background(), agentID, msg.ID, ack.Success, ack.Error); err != nil {
-				return err
-			}
+			completerErr = completer[0].CompletePolicyAck(context.Background(), agentID, msg.ID, ack.Success, ack.Error)
 		}
 		tracked, ok := tracker.Get(msg.ID, agentID)
 		if !ok {
-			return nil
+			return completerErr
 		}
 		if !ack.Success {
-			return nil
+			return completerErr
 		}
 
 		err = database.DB.Model(&db.BackupPolicy{}).
@@ -233,6 +232,7 @@ func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPush
 			Update("synced", true).Error
 		if err == nil {
 			tracker.Delete(msg.ID)
+			return completerErr
 		}
 		return err
 	}
