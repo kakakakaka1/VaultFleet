@@ -285,15 +285,19 @@ func (s *Service) recordDispatchFailure(ctx context.Context, command db.AgentCom
 		return nil
 	}
 	return s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&db.AgentCommand{}).
-			Where("id = ?", command.ID).
+		result := tx.Model(&db.AgentCommand{}).
+			Where("id = ? AND status NOT IN ?", command.ID, terminalStatuses()).
 			Updates(map[string]any{
 				"attempts":      gorm.Expr("attempts + ?", 1),
 				"dispatched_at": nil,
 				"error_message": dispatchErr.Error(),
 				"status":        CommandStatusPending,
-			}).Error; err != nil {
-			return err
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
 		}
 		if !isLongRunning(command.Type) {
 			return nil

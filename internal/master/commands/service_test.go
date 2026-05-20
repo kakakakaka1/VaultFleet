@@ -297,6 +297,25 @@ func TestDispatchDoesNotOverwritePolicyAckTerminalState(t *testing.T) {
 	assert.NotNil(t, found.CompletedAt)
 }
 
+func TestDispatchFailureDoesNotOverwritePolicyAckTerminalState(t *testing.T) {
+	database := setupCommandTestDB(t)
+	hub := newAckingHub("agent-1")
+	service := NewService(database, hub)
+	hub.onSend = func(message protocol.Message) {
+		require.NoError(t, service.CompletePolicyAck(context.Background(), "agent-1", message.ID, true, ""))
+	}
+	hub.err = errors.New("late write failure")
+	command := createPolicyPushCommandForTest(t, service, "agent-1")
+
+	require.NoError(t, service.DispatchPendingForAgent(context.Background(), "agent-1", 10))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, CommandStatusSucceeded, found.Status)
+	assert.NotNil(t, found.CompletedAt)
+	assert.Empty(t, found.ErrorMessage)
+}
+
 func setupCommandTestDB(t *testing.T) *db.Database {
 	t.Helper()
 	database, err := db.New(t.TempDir())
@@ -307,6 +326,7 @@ func setupCommandTestDB(t *testing.T) *db.Database {
 type ackingHub struct {
 	online map[string]bool
 	onSend func(protocol.Message)
+	err    error
 }
 
 func newAckingHub(agentID string) *ackingHub {
@@ -325,7 +345,7 @@ func (h *ackingHub) Send(agentID string, msg interface{}) error {
 	if h.onSend != nil {
 		h.onSend(message)
 	}
-	return nil
+	return h.err
 }
 
 type recordingHub struct {
