@@ -167,6 +167,33 @@ func (s *Service) DispatchPendingForAgent(ctx context.Context, agentID string, l
 	return nil
 }
 
+func (s *Service) CompletePolicyAck(ctx context.Context, agentID string, messageID string, success bool, errorText string) error {
+	if s == nil || s.DB == nil || s.DB.DB == nil || agentID == "" || messageID == "" {
+		return nil
+	}
+
+	now := s.now()
+	status := CommandStatusSucceeded
+	if !success {
+		status = CommandStatusFailed
+	}
+	updates := map[string]any{
+		"status":       status,
+		"completed_at": &now,
+		"updated_at":   now,
+	}
+	if success {
+		updates["error_message"] = ""
+	} else {
+		updates["error_message"] = errorText
+	}
+
+	return s.DB.DB.WithContext(ctx).
+		Model(&db.AgentCommand{}).
+		Where("agent_id = ? AND message_id = ? AND type = ?", agentID, messageID, protocol.TypePolicyPush).
+		Updates(updates).Error
+}
+
 func (s *Service) messageFromCommand(command db.AgentCommand) (protocol.Message, error) {
 	if s == nil || s.DB == nil {
 		return protocol.Message{}, errors.New("command service database not configured")

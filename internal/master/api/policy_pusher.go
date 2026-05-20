@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"log"
 
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
 	"vaultfleet/pkg/protocol"
@@ -16,9 +18,10 @@ type PolicyPusherHub interface {
 type PolicyLookupFunc func(agentID string) (*protocol.Message, bool)
 
 type PolicyChangedPusher struct {
-	DB     *db.Database
-	Hub    PolicyPusherHub
-	Lookup PolicyLookupFunc
+	DB       *db.Database
+	Hub      PolicyPusherHub
+	Lookup   PolicyLookupFunc
+	Commands *commands.Service
 }
 
 func NewPolicyChangedPusher(database *db.Database, hub PolicyPusherHub, lookup PolicyLookupFunc) *PolicyChangedPusher {
@@ -40,9 +43,41 @@ func (p *PolicyChangedPusher) Handle(event events.Event) {
 	if !ok || msg == nil {
 		return
 	}
-	if err := p.Hub.Send(agentID, *msg); err != nil {
-		log.Printf("push policy to agent %s failed: %v", agentID, err)
+	if p.Commands == nil {
+		if err := p.Hub.Send(agentID, *msg); err != nil {
+			log.Printf("push policy to agent %s failed: %v", agentID, err)
+		}
+		return
 	}
+
+	policyID, storageID := p.currentPolicyRefs(agentID)
+	if _, err := p.Commands.CreateCommand(context.Background(), commands.CreateCommandInput{
+		AgentID:   agentID,
+		Type:      protocol.TypePolicyPush,
+		Message:   *msg,
+		PolicyID:  policyID,
+		StorageID: storageID,
+	}); err != nil {
+		log.Printf("create policy command for agent %s failed: %v", agentID, err)
+		return
+	}
+	if err := p.Commands.DispatchPendingForAgent(context.Background(), agentID, 10); err != nil {
+		log.Printf("dispatch policy command for agent %s failed: %v", agentID, err)
+	}
+}
+
+func (p *PolicyChangedPusher) currentPolicyRefs(agentID string) (string, string) {
+	if p == nil || p.DB == nil || p.DB.DB == nil {
+		return "", ""
+	}
+	var policy db.BackupPolicy
+	if err := p.DB.DB.
+		Where("agent_id = ? AND synced = ?", agentID, false).
+		Order("updated_at DESC").
+		First(&policy).Error; err != nil {
+		return "", ""
+	}
+	return policy.ID, policy.StorageID
 }
 
 func eventAction(payload any) string {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -40,6 +41,10 @@ type trackedPolicyPush struct {
 	AgentID   string
 	PolicyID  string
 	UpdatedAt time.Time
+}
+
+type PolicyCommandCompleter interface {
+	CompletePolicyAck(ctx context.Context, agentID string, messageID string, success bool, errorText string) error
 }
 
 func NewPolicyPushTracker() *PolicyPushTracker {
@@ -102,6 +107,9 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	commandService := cfg.CommandService
 	if commandService == nil {
 		commandService = commands.NewService(cfg.Database, cfg.Hub)
+	}
+	if commandService != nil && commandService.Hub == nil {
+		commandService.Hub = cfg.Hub
 	}
 
 	authHandler := NewAuthHandler(cfg.Database)
@@ -197,15 +205,20 @@ func CurrentPolicyLookupWithTracker(database *db.Database, tracker *PolicyPushTr
 	}
 }
 
-func NewPolicyAckProcessor(database *db.Database) func(agentID string, msg protocol.Message) error {
-	return NewPolicyAckProcessorWithTracker(database, defaultPolicyPushTracker)
+func NewPolicyAckProcessor(database *db.Database, completer ...PolicyCommandCompleter) func(agentID string, msg protocol.Message) error {
+	return NewPolicyAckProcessorWithTracker(database, defaultPolicyPushTracker, completer...)
 }
 
-func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPushTracker) func(agentID string, msg protocol.Message) error {
+func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPushTracker, completer ...PolicyCommandCompleter) func(agentID string, msg protocol.Message) error {
 	return func(agentID string, msg protocol.Message) error {
 		ack, err := protocol.ParsePayload[protocol.PolicyAckPayload](&msg)
 		if err != nil {
 			return err
+		}
+		if len(completer) > 0 && completer[0] != nil {
+			if err := completer[0].CompletePolicyAck(context.Background(), agentID, msg.ID, ack.Success, ack.Error); err != nil {
+				return err
+			}
 		}
 		tracked, ok := tracker.Get(msg.ID, agentID)
 		if !ok {

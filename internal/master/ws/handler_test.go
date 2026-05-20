@@ -115,6 +115,33 @@ func TestHandler_ValidTokenAcceptedAndHubOnline(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestHandlerDispatchesPendingCommandsOnConnect(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	dispatched := make(chan string, 1)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.PendingCommandDispatcher = func(agentID string) error {
+		dispatched <- agentID
+		return nil
+	}
+	setup.router.GET("/ws-command-dispatch", handler.HandleWebSocket)
+	server := httptest.NewServer(setup.router)
+	t.Cleanup(server.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial(
+		websocketURL(server.URL, "/ws-command-dispatch", url.Values{"token": []string{"valid-token"}}),
+		nil,
+	)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	select {
+	case agentID := <-dispatched:
+		assert.Equal(t, "agent-1", agentID)
+	case <-time.After(time.Second):
+		t.Fatal("pending command dispatcher was not called")
+	}
+}
+
 func TestHandler_HeartbeatDispatchUpdatesLastSeen(t *testing.T) {
 	setup := setupHandlerTest(t, validTestAuth, noPolicy)
 	fixedNow := time.Date(2026, 5, 18, 10, 0, 0, 0, time.UTC)

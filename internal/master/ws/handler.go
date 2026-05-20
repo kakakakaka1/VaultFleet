@@ -22,17 +22,19 @@ type AgentAuthFunc func(token string) (agentID string, err error)
 type PolicyLookupFunc func(agentID string) (*protocol.Message, bool)
 type TaskResultProcessorFunc func(agentID string, msg protocol.Message) error
 type PolicyAckProcessorFunc func(agentID string, msg protocol.Message) error
+type PendingCommandDispatcherFunc func(agentID string) error
 type Handler struct {
-	hub                *Hub
-	eventBus           *events.Bus
-	authAgent          AgentAuthFunc
-	policyLookup       PolicyLookupFunc
-	taskResultProcess  TaskResultProcessorFunc
-	PolicyAckProcessor PolicyAckProcessorFunc
-	AgentStateUpdater  func(agentID string, status string, lastSeenAt *time.Time) error
-	upgrader           websocket.Upgrader
-	now                func() time.Time
-	pongWait           time.Duration
+	hub                      *Hub
+	eventBus                 *events.Bus
+	authAgent                AgentAuthFunc
+	policyLookup             PolicyLookupFunc
+	taskResultProcess        TaskResultProcessorFunc
+	PolicyAckProcessor       PolicyAckProcessorFunc
+	PendingCommandDispatcher PendingCommandDispatcherFunc
+	AgentStateUpdater        func(agentID string, status string, lastSeenAt *time.Time) error
+	upgrader                 websocket.Upgrader
+	now                      func() time.Time
+	pongWait                 time.Duration
 }
 
 func NewHandler(hub *Hub, eventBus *events.Bus, authAgent AgentAuthFunc, policyLookup PolicyLookupFunc, taskResultProcess TaskResultProcessorFunc) *Handler {
@@ -94,6 +96,12 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 			if err := safeConn.WriteJSON(msg); err != nil {
 				return
 			}
+		}
+	}
+
+	if h.PendingCommandDispatcher != nil {
+		if err := h.PendingCommandDispatcher(agentID); err != nil {
+			log.Printf("dispatch pending commands for agent %s failed: %v", agentID, err)
 		}
 	}
 

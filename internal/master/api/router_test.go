@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
 	"vaultfleet/internal/master/ws"
@@ -284,7 +285,9 @@ func TestPolicyChangedPusherSendsCurrentPolicyToOnlineAgent(t *testing.T) {
 	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
 	tracker := NewPolicyPushTracker()
 
+	commandService := commands.NewService(database, hub)
 	pusher := NewPolicyChangedPusher(database, hub, CurrentPolicyLookupWithTracker(database, tracker))
+	pusher.Commands = commandService
 	pusher.Handle(events.Event{
 		Type: events.PolicyChanged,
 		Payload: map[string]interface{}{
@@ -302,6 +305,46 @@ func TestPolicyChangedPusherSendsCurrentPolicyToOnlineAgent(t *testing.T) {
 	tracked, ok := tracker.Get(sent.ID, agent.ID)
 	require.True(t, ok)
 	assert.Equal(t, policy.ID, tracked.PolicyID)
+
+	var command db.AgentCommand
+	require.NoError(t, database.DB.First(&command, "agent_id = ? AND type = ?", agent.ID, protocol.TypePolicyPush).Error)
+	assert.Equal(t, commands.CommandStatusDispatched, command.Status)
+	assert.Equal(t, policy.ID, command.PolicyID)
+	assert.Equal(t, storage.ID, command.StorageID)
+	assert.Equal(t, sent.ID, command.MessageID)
+}
+
+func TestPolicyAckProcessorCompletesPolicyPushCommand(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
+	tracker := NewPolicyPushTracker()
+	commandService := commands.NewService(database, hub)
+	pusher := NewPolicyChangedPusher(database, hub, CurrentPolicyLookupWithTracker(database, tracker))
+	pusher.Commands = commandService
+	pusher.Handle(events.Event{
+		Type: events.PolicyChanged,
+		Payload: map[string]interface{}{
+			"agent_id": agent.ID,
+			"action":   "updated",
+		},
+	})
+	require.Len(t, hub.sent, 1)
+	messageID := hub.sent[0].message.ID
+	ack := policyAckMessageWithID(t, messageID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
+
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker, commandService)(agent.ID, *ack))
+
+	var command db.AgentCommand
+	require.NoError(t, database.DB.First(&command, "agent_id = ? AND message_id = ?", agent.ID, messageID).Error)
+	assert.Equal(t, commands.CommandStatusSucceeded, command.Status)
+	assert.NotNil(t, command.CompletedAt)
+	assert.Empty(t, command.ErrorMessage)
+
+	var policy db.BackupPolicy
+	require.NoError(t, database.DB.First(&policy, "agent_id = ?", agent.ID).Error)
+	assert.True(t, policy.Synced)
 }
 
 func TestPolicyAckProcessorSuccessfulOldAckDoesNotMarkNewerPolicySynced(t *testing.T) {

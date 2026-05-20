@@ -203,6 +203,50 @@ func TestDispatchPendingRecordsSendFailure(t *testing.T) {
 	assert.Contains(t, found.ErrorMessage, "write failed")
 }
 
+func TestCompletePolicyAckMarksCommandSucceeded(t *testing.T) {
+	database := setupCommandTestDB(t)
+	service := NewService(database, nil)
+	msg, err := protocol.NewMessage(protocol.TypePolicyPush, protocol.PolicyPushPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), CreateCommandInput{
+		AgentID:  "agent-1",
+		Type:     protocol.TypePolicyPush,
+		Message:  *msg,
+		PolicyID: "policy-1",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, service.CompletePolicyAck(context.Background(), "agent-1", msg.ID, true, ""))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, CommandStatusSucceeded, found.Status)
+	assert.NotNil(t, found.CompletedAt)
+	assert.Empty(t, found.ErrorMessage)
+}
+
+func TestCompletePolicyAckMarksCommandFailed(t *testing.T) {
+	database := setupCommandTestDB(t)
+	service := NewService(database, nil)
+	msg, err := protocol.NewMessage(protocol.TypePolicyPush, protocol.PolicyPushPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), CreateCommandInput{
+		AgentID:  "agent-1",
+		Type:     protocol.TypePolicyPush,
+		Message:  *msg,
+		PolicyID: "policy-1",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, service.CompletePolicyAck(context.Background(), "agent-1", msg.ID, false, "invalid schedule"))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, CommandStatusFailed, found.Status)
+	assert.Equal(t, "invalid schedule", found.ErrorMessage)
+	assert.NotNil(t, found.CompletedAt)
+}
+
 func setupCommandTestDB(t *testing.T) *db.Database {
 	t.Helper()
 	database, err := db.New(t.TempDir())
