@@ -89,6 +89,24 @@ func TestCreateStorageConfig(t *testing.T) {
 	assert.NotEqual(t, "", stored.RcloneConfig)
 }
 
+func TestCreateStorageConfigRejectsNonStringRcloneConfigValue(t *testing.T) {
+	setup := setupTestConfigAPI(t)
+
+	w := postAnyJSON(t, setup.router, "/api/storage", map[string]any{
+		"name":        "Cloudflare R2",
+		"rclone_type": "s3",
+		"rclone_config": map[string]any{
+			"region": 123,
+		},
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+
+	var count int64
+	require.NoError(t, setup.database.DB.Model(&db.StorageConfig{}).Count(&count).Error)
+	assert.Equal(t, int64(0), count)
+}
+
 func TestStorageResponsesRedactSecretFields(t *testing.T) {
 	setup := setupTestConfigAPI(t)
 	created := createStorageConfig(t, setup.router, "Cloudflare R2", map[string]any{
@@ -305,6 +323,33 @@ func TestUpdateStorageConfig(t *testing.T) {
 	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
 	assert.NotContains(t, stored.RcloneConfig, "new")
 	assert.NotContains(t, stored.RcloneConfig, "backup.example.com")
+}
+
+func TestUpdateStorageConfigRejectsNonStringRcloneConfigValue(t *testing.T) {
+	setup := setupTestConfigAPI(t)
+	created := createStorageConfig(t, setup.router, "Cloudflare R2", map[string]any{
+		"region":   "old-region",
+		"endpoint": "old.example.com",
+	})
+	id := created["id"].(string)
+
+	w := putJSON(t, setup.router, "/api/storage/"+id, map[string]any{
+		"rclone_config": map[string]any{
+			"region":   123,
+			"endpoint": "new.example.com",
+		},
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+
+	var stored db.StorageConfig
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
+	plaintext, err := db.Decrypt(stored.RcloneConfig, setup.database.MasterKey)
+	require.NoError(t, err)
+	assert.Contains(t, plaintext, "old-region")
+	assert.Contains(t, plaintext, "old.example.com")
+	assert.NotContains(t, plaintext, "new.example.com")
+	assert.NotContains(t, plaintext, "123")
 }
 
 func TestUpdateStorageConfigRoundTripPreservesRedactedSecrets(t *testing.T) {

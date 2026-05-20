@@ -79,7 +79,12 @@ func (h *ConfigHandler) CreateStorage(c *gin.Context) {
 		return
 	}
 
-	encryptedConfig, ok := h.encryptMap(c, request.RcloneConfig)
+	config, ok := stringifyRcloneConfig(c, request.RcloneConfig)
+	if !ok {
+		return
+	}
+
+	encryptedConfig, ok := h.encryptStringMap(c, config)
 	if !ok {
 		return
 	}
@@ -147,6 +152,10 @@ func (h *ConfigHandler) UpdateStorage(c *gin.Context) {
 		configChanged = true
 	}
 	if request.RcloneConfig != nil {
+		if _, ok := stringifyRcloneConfig(c, request.RcloneConfig); !ok {
+			return
+		}
+
 		nextConfig, err := h.preserveRedactedSecrets(storage.RcloneConfig, request.RcloneConfig)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "decrypt storage config"})
@@ -361,6 +370,14 @@ func (h *ConfigHandler) newStorageResponse(storage db.StorageConfig) (storageRes
 }
 
 func (h *ConfigHandler) encryptMap(c *gin.Context, value map[string]any) (string, bool) {
+	return h.encryptJSON(c, value)
+}
+
+func (h *ConfigHandler) encryptStringMap(c *gin.Context, value map[string]string) (string, bool) {
+	return h.encryptJSON(c, value)
+}
+
+func (h *ConfigHandler) encryptJSON(c *gin.Context, value any) (string, bool) {
 	plaintext, err := json.Marshal(value)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
