@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -450,6 +452,86 @@ func TestRefreshSnapshots(t *testing.T) {
 	assert.Contains(t, command.Result, `"snap-1"`)
 	assert.Empty(t, command.ErrorMessage)
 	assert.NotNil(t, command.CompletedAt)
+}
+
+func TestRefreshSnapshotsCancelledRequestStillCompletesFromAgentResponse(t *testing.T) {
+	setup := setupSnapshotAPI(t)
+	agent := createSnapshotTestAgent(t, setup.database, "online")
+	snapshotTime := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	setup.hub.online[agent.ID] = true
+	setup.handler.timeout = time.Minute
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	respCh := make(chan protocol.Message, 1)
+	sentMessageID := make(chan string, 1)
+	setup.hub.sendAndWait = func(agentID string, msg protocol.Message, timeout time.Duration) (<-chan protocol.Message, error) {
+		assert.Equal(t, agent.ID, agentID)
+		assert.Equal(t, protocol.TypeSnapshotListReq, msg.Type)
+		assert.Equal(t, time.Minute, timeout)
+		sentMessageID <- msg.ID
+		cancel()
+		return respCh, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/snapshots/refresh", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		setup.router.ServeHTTP(w, req)
+	}()
+
+	var messageID string
+	require.Eventually(t, func() bool {
+		select {
+		case messageID = <-sentMessageID:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-handlerDone:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, http.StatusGatewayTimeout, w.Code, w.Body.String())
+
+	resp, err := protocol.NewMessage(protocol.TypeSnapshotListResp, protocol.SnapshotListRespPayload{
+		AgentID: agent.ID,
+		Snapshots: []protocol.SnapshotInfo{
+			{ID: "snap-cancelled-refresh", Time: snapshotTime, Paths: []string{"/etc"}, Size: 512},
+		},
+	})
+	require.NoError(t, err)
+	resp.ID = messageID
+	respCh <- *resp
+	close(respCh)
+
+	require.Eventually(t, func() bool {
+		var snapshot db.Snapshot
+		if err := setup.database.DB.First(&snapshot, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-cancelled-refresh").Error; err != nil {
+			return false
+		}
+		if !snapshot.Timestamp.Equal(snapshotTime) || snapshot.Paths != `["/etc"]` {
+			return false
+		}
+
+		var command db.AgentCommand
+		if err := setup.database.DB.First(&command, "agent_id = ? AND message_id = ?", agent.ID, messageID).Error; err != nil {
+			return false
+		}
+		return command.Status == commands.CommandStatusSucceeded &&
+			command.ErrorMessage == "" &&
+			command.CompletedAt != nil &&
+			json.Valid([]byte(command.Result)) &&
+			strings.Contains(command.Result, "snap-cancelled-refresh")
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestRefreshSnapshotsOfflineQueuesCommand(t *testing.T) {

@@ -141,29 +141,9 @@ func (h *SnapshotHandler) RefreshSnapshots(c *gin.Context) {
 			writeErrorResponse(c, http.StatusGatewayTimeout, "timeout waiting for agent response")
 			return
 		}
-		if resp.Type != protocol.TypeSnapshotListResp {
-			_ = commandService.FailCommand(contextFromGin(c), agentID, msg.ID, "invalid agent response")
-			writeErrorResponse(c, http.StatusBadGateway, "invalid agent response")
-			return
-		}
-		payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&resp)
-		if err != nil {
-			_ = commandService.FailCommand(contextFromGin(c), agentID, msg.ID, "invalid agent response")
-			writeErrorResponse(c, http.StatusBadGateway, "invalid agent response")
-			return
-		}
-		if payload.Error != "" {
-			_ = commandService.FailCommand(contextFromGin(c), agentID, msg.ID, payload.Error)
-			writeErrorResponse(c, http.StatusBadGateway, payload.Error)
-			return
-		}
-		if err := upsertSnapshots(h.DB, agentID, payload.Snapshots); err != nil {
-			_ = commandService.FailCommand(contextFromGin(c), agentID, msg.ID, "database error")
-			writeErrorResponse(c, http.StatusInternalServerError, "database error")
-			return
-		}
-		if err := commandService.CompleteSnapshotList(contextFromGin(c), agentID, msg.ID, *payload); err != nil {
-			writeErrorResponse(c, http.StatusInternalServerError, "database error")
+		payload, status, message := h.completeSnapshotRefreshResponse(contextFromGin(c), commandService, agentID, msg.ID, resp)
+		if status != http.StatusOK {
+			writeErrorResponse(c, status, message)
 			return
 		}
 		snapshots, ok := h.loadSnapshotResponses(c, agentID)
@@ -172,9 +152,42 @@ func (h *SnapshotHandler) RefreshSnapshots(c *gin.Context) {
 		}
 		writeDataResponse(c, http.StatusOK, snapshotRefreshResponse{Count: len(payload.Snapshots), Snapshots: snapshots})
 	case <-c.Request.Context().Done():
-		_ = commandService.TimeoutCommand(contextFromGin(c), agentID, msg.ID)
+		go h.drainSnapshotRefreshResponse(respCh, commandService, agentID, msg.ID)
 		writeErrorResponse(c, http.StatusGatewayTimeout, "request cancelled")
 	}
+}
+
+func (h *SnapshotHandler) drainSnapshotRefreshResponse(respCh <-chan protocol.Message, commandService *commands.Service, agentID string, messageID string) {
+	resp, ok := <-respCh
+	if !ok {
+		_ = commandService.TimeoutCommand(context.Background(), agentID, messageID)
+		return
+	}
+	_, _, _ = h.completeSnapshotRefreshResponse(context.Background(), commandService, agentID, messageID, resp)
+}
+
+func (h *SnapshotHandler) completeSnapshotRefreshResponse(ctx context.Context, commandService *commands.Service, agentID string, messageID string, resp protocol.Message) (*protocol.SnapshotListRespPayload, int, string) {
+	if resp.Type != protocol.TypeSnapshotListResp {
+		_ = commandService.FailCommand(ctx, agentID, messageID, "invalid agent response")
+		return nil, http.StatusBadGateway, "invalid agent response"
+	}
+	payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&resp)
+	if err != nil {
+		_ = commandService.FailCommand(ctx, agentID, messageID, "invalid agent response")
+		return nil, http.StatusBadGateway, "invalid agent response"
+	}
+	if payload.Error != "" {
+		_ = commandService.FailCommand(ctx, agentID, messageID, payload.Error)
+		return nil, http.StatusBadGateway, payload.Error
+	}
+	if err := upsertSnapshots(h.DB, agentID, payload.Snapshots); err != nil {
+		_ = commandService.FailCommand(ctx, agentID, messageID, "database error")
+		return nil, http.StatusInternalServerError, "database error"
+	}
+	if err := commandService.CompleteSnapshotList(ctx, agentID, messageID, *payload); err != nil {
+		return nil, http.StatusInternalServerError, "database error"
+	}
+	return payload, http.StatusOK, ""
 }
 
 func (h *SnapshotHandler) loadSnapshotResponses(c *gin.Context, agentID string) ([]snapshotResponse, bool) {
