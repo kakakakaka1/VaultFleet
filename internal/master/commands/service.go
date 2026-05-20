@@ -35,11 +35,12 @@ type Hub interface {
 }
 
 type Service struct {
-	DB         *db.Database
-	Hub        Hub
-	Now        func() time.Time
-	dispatchMu sync.Mutex
+	DB  *db.Database
+	Hub Hub
+	Now func() time.Time
 }
+
+var dispatchMu sync.Mutex
 
 type CreateCommandInput struct {
 	AgentID    string
@@ -140,8 +141,8 @@ func (s *Service) DispatchPendingForAgent(ctx context.Context, agentID string, l
 		limit = 100
 	}
 
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
+	dispatchMu.Lock()
+	defer dispatchMu.Unlock()
 
 	now := s.now()
 	var commands []db.AgentCommand

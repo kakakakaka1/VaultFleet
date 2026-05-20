@@ -97,9 +97,32 @@ func TestDispatchPendingForAgentConcurrentDispatchSendsLongCommandAtMostOnce(t *
 	service := NewService(database, hub)
 	command := createCommandForTest(t, service, "agent-1", protocol.TypeBackupNow)
 
+	assertConcurrentDispatchSendsLongCommandAtMostOnce(t, database, hub, command, service, service)
+}
+
+func TestDispatchPendingForAgentConcurrentServicesSendLongCommandAtMostOnce(t *testing.T) {
+	database := setupCommandTestDB(t)
+	hub := newBlockingHub("agent-1")
+	firstService := NewService(database, hub)
+	secondService := NewService(database, hub)
+	command := createCommandForTest(t, firstService, "agent-1", protocol.TypeBackupNow)
+
+	assertConcurrentDispatchSendsLongCommandAtMostOnce(t, database, hub, command, firstService, secondService)
+}
+
+func assertConcurrentDispatchSendsLongCommandAtMostOnce(
+	t *testing.T,
+	database *db.Database,
+	hub *blockingHub,
+	command db.AgentCommand,
+	firstService *Service,
+	secondService *Service,
+) {
+	t.Helper()
+
 	firstErr := make(chan error, 1)
 	go func() {
-		firstErr <- service.DispatchPendingForAgent(context.Background(), "agent-1", 10)
+		firstErr <- firstService.DispatchPendingForAgent(context.Background(), "agent-1", 10)
 	}()
 
 	hub.waitForSend(t)
@@ -117,7 +140,7 @@ func TestDispatchPendingForAgentConcurrentDispatchSendsLongCommandAtMostOnce(t *
 
 	secondErr := make(chan error, 1)
 	go func() {
-		secondErr <- service.DispatchPendingForAgent(context.Background(), "agent-1", 10)
+		secondErr <- secondService.DispatchPendingForAgent(context.Background(), "agent-1", 10)
 	}()
 
 	secondReturnedEarly := false
