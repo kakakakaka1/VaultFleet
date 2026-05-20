@@ -230,6 +230,180 @@ func (s *Service) CompletePolicyAck(ctx context.Context, agentID string, message
 	})
 }
 
+func (s *Service) CompleteTaskResult(ctx context.Context, agentID string, messageID string, result protocol.TaskResultPayload) error {
+	if s == nil || s.DB == nil || s.DB.DB == nil || messageID == "" {
+		return nil
+	}
+	if agentID == "" {
+		agentID = result.AgentID
+	}
+
+	rawResult, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal command result: %w", err)
+	}
+	now := s.now()
+	commandStatus := CommandStatusFailed
+	if result.Status == TaskStatusSuccess {
+		commandStatus = CommandStatusSucceeded
+	}
+
+	errorMessage := result.ErrorLog
+	if commandStatus == CommandStatusSucceeded {
+		errorMessage = ""
+	}
+	startedAt := nullableTime(result.StartedAt)
+	finishedAt := nullableTime(result.FinishedAt)
+	if finishedAt == nil && isTaskTerminal(result.Status) {
+		finishedAt = &now
+	}
+
+	return s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		update := tx.Model(&db.AgentCommand{}).
+			Where("agent_id = ? AND message_id = ? AND status NOT IN ?", agentID, messageID, terminalStatuses()).
+			Updates(map[string]any{
+				"status":        commandStatus,
+				"result":        string(rawResult),
+				"error_message": errorMessage,
+				"completed_at":  &now,
+				"updated_at":    now,
+			})
+		if update.Error != nil {
+			return update.Error
+		}
+		if update.RowsAffected == 0 {
+			return nil
+		}
+
+		return tx.Model(&db.TaskHistory{}).
+			Where("agent_id = ? AND message_id = ? AND command_id <> ?", agentID, messageID, "").
+			Updates(map[string]any{
+				"status":      result.Status,
+				"snapshot_id": result.SnapshotID,
+				"duration_ms": result.DurationMs,
+				"repo_size":   result.RepoSize,
+				"error_log":   result.ErrorLog,
+				"started_at":  startedAt,
+				"finished_at": finishedAt,
+				"updated_at":  now,
+			}).Error
+	})
+}
+
+func (s *Service) CompleteSnapshotList(ctx context.Context, agentID string, messageID string, result protocol.SnapshotListRespPayload) error {
+	return s.completeCommand(ctx, agentID, messageID, CommandStatusSucceeded, result, "")
+}
+
+func (s *Service) FailCommand(ctx context.Context, agentID string, messageID string, errorText string) error {
+	return s.completeCommand(ctx, agentID, messageID, CommandStatusFailed, nil, errorText)
+}
+
+func (s *Service) TimeoutCommand(ctx context.Context, agentID string, messageID string) error {
+	return s.completeCommand(ctx, agentID, messageID, CommandStatusTimeout, nil, "command timeout")
+}
+
+func (s *Service) completeCommand(ctx context.Context, agentID string, messageID string, status string, result any, errorText string) error {
+	if s == nil || s.DB == nil || s.DB.DB == nil || messageID == "" {
+		return nil
+	}
+
+	now := s.now()
+	updates := map[string]any{
+		"status":        status,
+		"error_message": errorText,
+		"completed_at":  &now,
+		"updated_at":    now,
+	}
+	if result != nil {
+		rawResult, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Errorf("marshal command result: %w", err)
+		}
+		updates["result"] = string(rawResult)
+	}
+
+	query := s.DB.DB.WithContext(ctx).Model(&db.AgentCommand{}).
+		Where("message_id = ? AND status NOT IN ?", messageID, terminalStatuses())
+	if agentID != "" {
+		query = query.Where("agent_id = ?", agentID)
+	}
+	return query.Updates(updates).Error
+}
+
+func (s *Service) TimeoutExpired(ctx context.Context) (int64, error) {
+	if s == nil || s.DB == nil || s.DB.DB == nil {
+		return 0, nil
+	}
+
+	now := s.now()
+	var expired []db.AgentCommand
+	if err := s.DB.DB.WithContext(ctx).
+		Where("status IN ? AND deadline_at IS NOT NULL AND deadline_at <= ?",
+			[]string{CommandStatusPending, CommandStatusDispatched, CommandStatusRunning},
+			now,
+		).
+		Find(&expired).Error; err != nil {
+		return 0, err
+	}
+
+	var count int64
+	for _, command := range expired {
+		updated, err := s.timeoutCommandAndTask(ctx, command, now)
+		if err != nil {
+			return count, err
+		}
+		count += updated
+	}
+	return count, nil
+}
+
+func (s *Service) timeoutCommandAndTask(ctx context.Context, command db.AgentCommand, now time.Time) (int64, error) {
+	var rows int64
+	err := s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		update := tx.Model(&db.AgentCommand{}).
+			Where("id = ? AND status IN ?", command.ID, []string{CommandStatusPending, CommandStatusDispatched, CommandStatusRunning}).
+			Updates(map[string]any{
+				"status":        CommandStatusTimeout,
+				"error_message": "command timeout",
+				"completed_at":  &now,
+				"updated_at":    now,
+			})
+		if update.Error != nil {
+			return update.Error
+		}
+		rows = update.RowsAffected
+		if rows == 0 {
+			return nil
+		}
+		return tx.Model(&db.TaskHistory{}).
+			Where("command_id = ?", command.ID).
+			Updates(map[string]any{
+				"status":      TaskStatusTimeout,
+				"error_log":   "command timeout",
+				"finished_at": &now,
+				"updated_at":  now,
+			}).Error
+	})
+	return rows, err
+}
+
+func (s *Service) RunTimeoutScanner(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _ = s.TimeoutExpired(ctx)
+		}
+	}
+}
+
 func (s *Service) messageFromCommand(command db.AgentCommand) (protocol.Message, error) {
 	if s == nil || s.DB == nil {
 		return protocol.Message{}, errors.New("command service database not configured")
@@ -325,4 +499,15 @@ func isTerminal(status string) bool {
 
 func terminalStatuses() []string {
 	return []string{CommandStatusSucceeded, CommandStatusFailed, CommandStatusTimeout}
+}
+
+func isTaskTerminal(status string) bool {
+	return status == TaskStatusSuccess || status == TaskStatusFailed || status == TaskStatusTimeout
+}
+
+func nullableTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
 }

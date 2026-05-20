@@ -280,6 +280,133 @@ func TestCompletePolicyAckDoesNotRewriteTerminalCommand(t *testing.T) {
 	assert.Empty(t, found.ErrorMessage)
 }
 
+func TestCompleteTaskResultUpdatesCommandAndTaskHistory(t *testing.T) {
+	database := setupCommandTestDB(t)
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	service := NewService(database, nil)
+	service.Now = func() time.Time { return now }
+	startedAt := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	finishedAt := startedAt.Add(2 * time.Minute)
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), CreateCommandInput{
+		AgentID:   "agent-1",
+		Type:      protocol.TypeBackupNow,
+		Message:   *msg,
+		TaskType:  "backup",
+		TaskState: TaskStatusRunning,
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).Where("id = ?", command.ID).Update("status", CommandStatusRunning).Error)
+
+	require.NoError(t, service.CompleteTaskResult(context.Background(), "agent-1", msg.ID, protocol.TaskResultPayload{
+		AgentID:    "agent-1",
+		TaskType:   "backup",
+		Status:     "success",
+		SnapshotID: "snap-1",
+		DurationMs: 120000,
+		RepoSize:   2048,
+		StartedAt:  startedAt,
+		FinishedAt: finishedAt,
+	}))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, CommandStatusSucceeded, found.Status)
+	require.NotNil(t, found.CompletedAt)
+	assert.True(t, found.CompletedAt.Equal(now))
+	assert.Empty(t, found.ErrorMessage)
+	assert.Contains(t, found.Result, `"snapshot_id":"snap-1"`)
+
+	var history db.TaskHistory
+	require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, TaskStatusSuccess, history.Status)
+	assert.Equal(t, "snap-1", history.SnapshotID)
+	assert.Equal(t, int64(120000), history.DurationMs)
+	assert.Equal(t, int64(2048), history.RepoSize)
+	require.NotNil(t, history.StartedAt)
+	assert.True(t, history.StartedAt.Equal(startedAt))
+	require.NotNil(t, history.FinishedAt)
+	assert.True(t, history.FinishedAt.Equal(finishedAt))
+}
+
+func TestCompleteTaskResultMarksCommandFailed(t *testing.T) {
+	database := setupCommandTestDB(t)
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	service := NewService(database, nil)
+	service.Now = func() time.Time { return now }
+	startedAt := now.Add(-time.Minute)
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), CreateCommandInput{
+		AgentID:   "agent-1",
+		Type:      protocol.TypeBackupNow,
+		Message:   *msg,
+		TaskType:  "backup",
+		TaskState: TaskStatusRunning,
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).Where("id = ?", command.ID).Update("status", CommandStatusRunning).Error)
+
+	require.NoError(t, service.CompleteTaskResult(context.Background(), "agent-1", msg.ID, protocol.TaskResultPayload{
+		AgentID:   "agent-1",
+		TaskType:  "backup",
+		Status:    "failed",
+		ErrorLog:  "restic failed",
+		StartedAt: startedAt,
+	}))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, CommandStatusFailed, found.Status)
+	assert.Equal(t, "restic failed", found.ErrorMessage)
+	require.NotNil(t, found.CompletedAt)
+	assert.True(t, found.CompletedAt.Equal(now))
+
+	var history db.TaskHistory
+	require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, TaskStatusFailed, history.Status)
+	assert.Equal(t, "restic failed", history.ErrorLog)
+	require.NotNil(t, history.FinishedAt)
+	assert.True(t, history.FinishedAt.Equal(now))
+}
+
+func TestTimeoutExpiredCommandsMarksCommandAndTask(t *testing.T) {
+	database := setupCommandTestDB(t)
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	service := NewService(database, nil)
+	service.Now = func() time.Time { return now }
+	command := createCommandForTest(t, service, "agent-1", protocol.TypeBackupNow)
+	pastDeadline := now.Add(-time.Second)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Updates(map[string]any{
+			"status":      CommandStatusRunning,
+			"deadline_at": &pastDeadline,
+		}).Error)
+	require.NoError(t, database.DB.Model(&db.TaskHistory{}).
+		Where("command_id = ?", command.ID).
+		Update("status", TaskStatusRunning).Error)
+
+	count, err := service.TimeoutExpired(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, CommandStatusTimeout, found.Status)
+	assert.Equal(t, "command timeout", found.ErrorMessage)
+	require.NotNil(t, found.CompletedAt)
+	assert.True(t, found.CompletedAt.Equal(now))
+
+	var history db.TaskHistory
+	require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, TaskStatusTimeout, history.Status)
+	assert.Equal(t, "command timeout", history.ErrorLog)
+	require.NotNil(t, history.FinishedAt)
+	assert.True(t, history.FinishedAt.Equal(now))
+}
+
 func TestDispatchDoesNotOverwritePolicyAckTerminalState(t *testing.T) {
 	database := setupCommandTestDB(t)
 	hub := newAckingHub("agent-1")
