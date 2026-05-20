@@ -337,6 +337,70 @@ func TestTaskResultProcessorCompletesCommandLinkedBackupAndPersistsSnapshots(t *
 	assert.Equal(t, commands.CommandStatusSucceeded, found.Status)
 }
 
+func TestTaskResultProcessorDoesNotPersistSnapshotsForTerminalCommand(t *testing.T) {
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := createSnapshotTestAgent(t, database, "online")
+	service := commands.NewService(database, nil)
+	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: agent.ID})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), commands.CreateCommandInput{
+		AgentID:   agent.ID,
+		Type:      protocol.TypeBackupNow,
+		Message:   *msg,
+		TaskType:  "backup",
+		TaskState: commands.TaskStatusRunning,
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Updates(map[string]any{
+			"status":        commands.CommandStatusFailed,
+			"error_message": "already failed",
+			"completed_at":  &now,
+		}).Error)
+	resultMsg, err := protocol.NewMessage(protocol.TypeTaskResult, protocol.TaskResultPayload{
+		AgentID:    agent.ID,
+		TaskType:   "backup",
+		Status:     "success",
+		SnapshotID: "snap-late-backup",
+		DurationMs: 120000,
+		RepoSize:   2048,
+		StartedAt:  now.Add(-2 * time.Minute),
+		FinishedAt: now.Add(time.Minute),
+		Snapshots: []protocol.SnapshotInfo{
+			{ID: "snap-late-backup", Time: now.Add(time.Minute), Paths: []string{"/late"}, Size: 2048},
+		},
+	})
+	require.NoError(t, err)
+	resultMsg.ID = msg.ID
+
+	processor := NewTaskResultProcessor(database, service)
+	require.NoError(t, processor(agent.ID, *resultMsg))
+
+	var snapshotCount int64
+	require.NoError(t, database.DB.Model(&db.Snapshot{}).
+		Where("agent_id = ? AND snapshot_id = ?", agent.ID, "snap-late-backup").
+		Count(&snapshotCount).Error)
+	assert.Equal(t, int64(0), snapshotCount)
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, commands.CommandStatusFailed, found.Status)
+	assert.Equal(t, "already failed", found.ErrorMessage)
+	require.NotNil(t, found.CompletedAt)
+	assert.True(t, found.CompletedAt.Equal(now))
+
+	var history db.TaskHistory
+	require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, commands.TaskStatusRunning, history.Status)
+	assert.Empty(t, history.SnapshotID)
+	assert.Equal(t, int64(0), history.DurationMs)
+	assert.Equal(t, int64(0), history.RepoSize)
+	assert.Nil(t, history.FinishedAt)
+}
+
 func TestUpsertSnapshotsConcurrentSameSnapshotDoesNotDuplicate(t *testing.T) {
 	database, err := db.New(t.TempDir())
 	require.NoError(t, err)
@@ -660,6 +724,84 @@ func TestRefreshSnapshotsTimeout(t *testing.T) {
 	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/snapshots/refresh", map[string]any{})
 
 	require.Equal(t, http.StatusGatewayTimeout, w.Code)
+	var command db.AgentCommand
+	require.NoError(t, setup.database.DB.First(&command, "agent_id = ? AND type = ?", agent.ID, protocol.TypeSnapshotListReq).Error)
+	assert.Equal(t, commands.CommandStatusTimeout, command.Status)
+	assert.Equal(t, "command timeout", command.ErrorMessage)
+	assert.NotNil(t, command.CompletedAt)
+}
+
+func TestSnapshotListResponseProcessorDoesNotPersistSnapshotsForTerminalCommand(t *testing.T) {
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := createSnapshotTestAgent(t, database, "online")
+	service := commands.NewService(database, nil)
+	request, err := protocol.NewMessage(protocol.TypeSnapshotListReq, protocol.SnapshotListReqPayload{AgentID: agent.ID})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), commands.CreateCommandInput{
+		AgentID: agent.ID,
+		Type:    protocol.TypeSnapshotListReq,
+		Message: *request,
+	})
+	require.NoError(t, err)
+	completedAt := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Updates(map[string]any{
+			"status":        commands.CommandStatusTimeout,
+			"error_message": "command timeout",
+			"completed_at":  &completedAt,
+		}).Error)
+	response, err := protocol.NewMessage(protocol.TypeSnapshotListResp, protocol.SnapshotListRespPayload{
+		AgentID: agent.ID,
+		Snapshots: []protocol.SnapshotInfo{
+			{ID: "snap-late-list", Time: completedAt.Add(time.Minute), Paths: []string{"/late"}, Size: 512},
+		},
+	})
+	require.NoError(t, err)
+	response.ID = request.ID
+
+	processor := NewSnapshotListResponseProcessor(database, service)
+	require.NoError(t, processor(agent.ID, *response))
+
+	var snapshotCount int64
+	require.NoError(t, database.DB.Model(&db.Snapshot{}).
+		Where("agent_id = ? AND snapshot_id = ?", agent.ID, "snap-late-list").
+		Count(&snapshotCount).Error)
+	assert.Equal(t, int64(0), snapshotCount)
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, commands.CommandStatusTimeout, found.Status)
+	assert.Equal(t, "command timeout", found.ErrorMessage)
+	require.NotNil(t, found.CompletedAt)
+	assert.True(t, found.CompletedAt.Equal(completedAt))
+}
+
+func TestRefreshSnapshotsClosedWaiterUsesDetachedContext(t *testing.T) {
+	setup := setupSnapshotAPI(t)
+	agent := createSnapshotTestAgent(t, setup.database, "online")
+	setup.hub.online[agent.ID] = true
+	setup.handler.timeout = time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	setup.hub.sendAndWait = func(agentID string, msg protocol.Message, timeout time.Duration) (<-chan protocol.Message, error) {
+		assert.Equal(t, agent.ID, agentID)
+		assert.Equal(t, protocol.TypeSnapshotListReq, msg.Type)
+		setup.handler.Commands.Now = func() time.Time {
+			cancel()
+			return time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+		}
+		ch := make(chan protocol.Message)
+		close(ch)
+		return ch, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/snapshots/refresh", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	setup.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusGatewayTimeout, w.Code, w.Body.String())
 	var command db.AgentCommand
 	require.NoError(t, setup.database.DB.First(&command, "agent_id = ? AND type = ?", agent.ID, protocol.TypeSnapshotListReq).Error)
 	assert.Equal(t, commands.CommandStatusTimeout, command.Status)

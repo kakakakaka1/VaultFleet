@@ -42,6 +42,8 @@ type Service struct {
 
 var dispatchMu sync.Mutex
 
+var errCommandNotActive = errors.New("command is not active")
+
 type CreateCommandInput struct {
 	AgentID         string
 	Type            string
@@ -231,8 +233,13 @@ func (s *Service) CompletePolicyAck(ctx context.Context, agentID string, message
 }
 
 func (s *Service) CompleteTaskResult(ctx context.Context, agentID string, messageID string, result protocol.TaskResultPayload) error {
+	_, err := s.CompleteTaskResultWith(ctx, agentID, messageID, result, nil)
+	return err
+}
+
+func (s *Service) CompleteTaskResultWith(ctx context.Context, agentID string, messageID string, result protocol.TaskResultPayload, apply func(*gorm.DB) error) (bool, error) {
 	if s == nil || s.DB == nil || s.DB.DB == nil || messageID == "" {
-		return nil
+		return false, nil
 	}
 	if agentID == "" {
 		agentID = result.AgentID
@@ -240,7 +247,7 @@ func (s *Service) CompleteTaskResult(ctx context.Context, agentID string, messag
 
 	rawResult, err := json.Marshal(result)
 	if err != nil {
-		return fmt.Errorf("marshal command result: %w", err)
+		return false, fmt.Errorf("marshal command result: %w", err)
 	}
 	now := s.now()
 	commandStatus := CommandStatusFailed
@@ -258,7 +265,8 @@ func (s *Service) CompleteTaskResult(ctx context.Context, agentID string, messag
 		finishedAt = &now
 	}
 
-	return s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	completed := false
+	err = s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var command db.AgentCommand
 		err := tx.
 			Where("agent_id = ? AND message_id = ? AND status NOT IN ?", agentID, messageID, terminalStatuses()).
@@ -268,6 +276,12 @@ func (s *Service) CompleteTaskResult(ctx context.Context, agentID string, messag
 		}
 		if err != nil {
 			return err
+		}
+
+		if apply != nil {
+			if err := apply(tx); err != nil {
+				return err
+			}
 		}
 
 		update := tx.Model(&db.AgentCommand{}).
@@ -283,7 +297,7 @@ func (s *Service) CompleteTaskResult(ctx context.Context, agentID string, messag
 			return update.Error
 		}
 		if update.RowsAffected == 0 {
-			return nil
+			return errCommandNotActive
 		}
 
 		taskUpdates := map[string]any{
@@ -298,14 +312,86 @@ func (s *Service) CompleteTaskResult(ctx context.Context, agentID string, messag
 		if startedAt != nil {
 			taskUpdates["started_at"] = startedAt
 		}
-		return tx.Model(&db.TaskHistory{}).
+		if err := tx.Model(&db.TaskHistory{}).
 			Where("command_id = ?", command.ID).
-			Updates(taskUpdates).Error
+			Updates(taskUpdates).Error; err != nil {
+			return err
+		}
+		completed = true
+		return nil
 	})
+	if errors.Is(err, errCommandNotActive) {
+		return false, nil
+	}
+	return completed, err
 }
 
 func (s *Service) CompleteSnapshotList(ctx context.Context, agentID string, messageID string, result protocol.SnapshotListRespPayload) error {
-	return s.completeCommand(ctx, agentID, messageID, CommandStatusSucceeded, result, "")
+	_, err := s.CompleteSnapshotListWith(ctx, agentID, messageID, result, nil)
+	return err
+}
+
+func (s *Service) CompleteSnapshotListWith(ctx context.Context, agentID string, messageID string, result protocol.SnapshotListRespPayload, apply func(*gorm.DB) error) (bool, error) {
+	if s == nil || s.DB == nil || s.DB.DB == nil || messageID == "" {
+		return false, nil
+	}
+	if agentID == "" {
+		agentID = result.AgentID
+	}
+
+	rawResult, err := json.Marshal(result)
+	if err != nil {
+		return false, fmt.Errorf("marshal command result: %w", err)
+	}
+	now := s.now()
+
+	completed := false
+	err = s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var command db.AgentCommand
+		err := tx.
+			Where(
+				"agent_id = ? AND message_id = ? AND type = ? AND status NOT IN ?",
+				agentID,
+				messageID,
+				protocol.TypeSnapshotListReq,
+				terminalStatuses(),
+			).
+			First(&command).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		if apply != nil {
+			if err := apply(tx); err != nil {
+				return err
+			}
+		}
+
+		update := tx.Model(&db.AgentCommand{}).
+			Where("id = ? AND status NOT IN ?", command.ID, terminalStatuses()).
+			Updates(map[string]any{
+				"status":        CommandStatusSucceeded,
+				"result":        string(rawResult),
+				"error_message": "",
+				"completed_at":  &now,
+				"updated_at":    now,
+			})
+		if update.Error != nil {
+			return update.Error
+		}
+		if update.RowsAffected == 0 {
+			return errCommandNotActive
+		}
+		completed = true
+		return nil
+	})
+	if errors.Is(err, errCommandNotActive) {
+		return false, nil
+	}
+	return completed, err
 }
 
 func (s *Service) FailCommand(ctx context.Context, agentID string, messageID string, errorText string) error {

@@ -36,8 +36,12 @@ type TaskResultCommandCompleter interface {
 	CompleteTaskResult(ctx context.Context, agentID string, messageID string, result protocol.TaskResultPayload) error
 }
 
+type taskResultCommandCompleterWithApply interface {
+	CompleteTaskResultWith(ctx context.Context, agentID string, messageID string, result protocol.TaskResultPayload, apply func(*gorm.DB) error) (bool, error)
+}
+
 type SnapshotListCommandCompleter interface {
-	CompleteSnapshotList(ctx context.Context, agentID string, messageID string, result protocol.SnapshotListRespPayload) error
+	CompleteSnapshotListWith(ctx context.Context, agentID string, messageID string, result protocol.SnapshotListRespPayload, apply func(*gorm.DB) error) (bool, error)
 	FailCommand(ctx context.Context, agentID string, messageID string, errorText string) error
 }
 
@@ -141,7 +145,7 @@ func (h *SnapshotHandler) RefreshSnapshots(c *gin.Context) {
 	select {
 	case resp, ok := <-respCh:
 		if !ok {
-			_ = commandService.TimeoutCommand(contextFromGin(c), agentID, msg.ID)
+			_ = commandService.TimeoutCommand(context.Background(), agentID, msg.ID)
 			writeErrorResponse(c, http.StatusGatewayTimeout, "timeout waiting for agent response")
 			return
 		}
@@ -184,12 +188,15 @@ func (h *SnapshotHandler) completeSnapshotRefreshResponse(ctx context.Context, c
 		_ = commandService.FailCommand(ctx, agentID, messageID, payload.Error)
 		return nil, http.StatusBadGateway, payload.Error
 	}
-	if err := upsertSnapshots(h.DB, agentID, payload.Snapshots); err != nil {
+	completed, err := commandService.CompleteSnapshotListWith(ctx, agentID, messageID, *payload, func(tx *gorm.DB) error {
+		return upsertSnapshotsDB(tx, agentID, payload.Snapshots)
+	})
+	if err != nil {
 		_ = commandService.FailCommand(ctx, agentID, messageID, "database error")
 		return nil, http.StatusInternalServerError, "database error"
 	}
-	if err := commandService.CompleteSnapshotList(ctx, agentID, messageID, *payload); err != nil {
-		return nil, http.StatusInternalServerError, "database error"
+	if !completed {
+		return nil, http.StatusGatewayTimeout, "command is no longer active"
 	}
 	return payload, http.StatusOK, ""
 }
@@ -235,11 +242,14 @@ func NewTaskResultProcessor(database *db.Database, completer ...TaskResultComman
 		if err != nil {
 			return err
 		}
-		if err := upsertCommandLinkedBackupSnapshots(database, agentID, msg.ID, *result); err != nil {
-			return err
-		}
 		if len(completer) > 0 && completer[0] != nil {
-			if err := completer[0].CompleteTaskResult(context.Background(), agentID, msg.ID, *result); err != nil {
+			if withApply, ok := completer[0].(taskResultCommandCompleterWithApply); ok {
+				if _, err := withApply.CompleteTaskResultWith(context.Background(), agentID, msg.ID, *result, func(tx *gorm.DB) error {
+					return upsertCommandLinkedBackupSnapshotsDB(tx, agentID, msg.ID, *result)
+				}); err != nil {
+					return err
+				}
+			} else if err := completer[0].CompleteTaskResult(context.Background(), agentID, msg.ID, *result); err != nil {
 				return err
 			}
 		}
@@ -259,16 +269,17 @@ func NewSnapshotListResponseProcessor(database *db.Database, completer SnapshotL
 			}
 			return completer.FailCommand(context.Background(), agentID, msg.ID, payload.Error)
 		}
-		if err := upsertSnapshots(database, agentID, payload.Snapshots); err != nil {
-			if completer != nil {
-				_ = completer.FailCommand(context.Background(), agentID, msg.ID, "database error")
-			}
+		if completer == nil {
+			return upsertSnapshots(database, agentID, payload.Snapshots)
+		}
+		_, err = completer.CompleteSnapshotListWith(context.Background(), agentID, msg.ID, *payload, func(tx *gorm.DB) error {
+			return upsertSnapshotsDB(tx, agentID, payload.Snapshots)
+		})
+		if err != nil {
+			_ = completer.FailCommand(context.Background(), agentID, msg.ID, "database error")
 			return err
 		}
-		if completer == nil {
-			return nil
-		}
-		return completer.CompleteSnapshotList(context.Background(), agentID, msg.ID, *payload)
+		return nil
 	}
 }
 
@@ -287,6 +298,23 @@ func upsertCommandLinkedBackupSnapshots(database *db.Database, agentID string, m
 		return err
 	}
 	return upsertSnapshotsDB(database.DB, agentID, result.Snapshots)
+}
+
+func upsertCommandLinkedBackupSnapshotsDB(gormDB *gorm.DB, agentID string, messageID string, result protocol.TaskResultPayload) error {
+	if result.TaskType != "backup" || result.Status != "success" || len(result.Snapshots) == 0 || messageID == "" {
+		return nil
+	}
+	if gormDB == nil {
+		return errors.New("database not configured")
+	}
+	if agentID == "" {
+		agentID = result.AgentID
+	}
+	linked, err := commandLinkedTaskHistoryExists(gormDB, agentID, messageID)
+	if err != nil || !linked {
+		return err
+	}
+	return upsertSnapshotsDB(gormDB, agentID, result.Snapshots)
 }
 
 func commandLinkedTaskHistoryExists(gormDB *gorm.DB, agentID string, messageID string) (bool, error) {
