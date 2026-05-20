@@ -235,6 +235,67 @@ func TestTaskHistoryCRUD(t *testing.T) {
 	assert.Error(t, result.Error)
 }
 
+func TestAgentCommandCRUD(t *testing.T) {
+	database := setupTestDB(t)
+	now := time.Now().UTC()
+	completed := now.Add(time.Minute)
+
+	command := AgentCommand{
+		AgentID:      "agent-001",
+		Type:         "backup_now",
+		Status:       "pending",
+		MessageID:    "msg-001",
+		Payload:      "encrypted-payload",
+		Result:       "",
+		ErrorMessage: "",
+		Attempts:     0,
+		DeadlineAt:   &completed,
+	}
+	require.NoError(t, database.DB.Create(&command).Error)
+	assert.NotEmpty(t, command.ID)
+
+	var found AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, "agent-001", found.AgentID)
+	assert.Equal(t, "backup_now", found.Type)
+	assert.Equal(t, "pending", found.Status)
+	assert.Equal(t, "msg-001", found.MessageID)
+
+	require.NoError(t, database.DB.Model(&found).Updates(map[string]any{
+		"status":       "succeeded",
+		"completed_at": &completed,
+		"result":       `{"status":"success"}`,
+	}).Error)
+
+	var updated AgentCommand
+	require.NoError(t, database.DB.First(&updated, "id = ?", command.ID).Error)
+	assert.Equal(t, "succeeded", updated.Status)
+	assert.JSONEq(t, `{"status":"success"}`, updated.Result)
+	assert.NotNil(t, updated.CompletedAt)
+}
+
+func TestTaskHistoryRunFieldsCRUD(t *testing.T) {
+	database := setupTestDB(t)
+	now := time.Now().UTC()
+	history := TaskHistory{
+		AgentID:   "agent-001",
+		Type:      "backup",
+		Status:    "pending",
+		CommandID: "command-001",
+		PolicyID:  "policy-001",
+		StorageID: "storage-001",
+		StartedAt: &now,
+	}
+	require.NoError(t, database.DB.Create(&history).Error)
+
+	var found TaskHistory
+	require.NoError(t, database.DB.First(&found, "id = ?", history.ID).Error)
+	assert.Equal(t, "command-001", found.CommandID)
+	assert.Equal(t, "policy-001", found.PolicyID)
+	assert.Equal(t, "storage-001", found.StorageID)
+	assert.False(t, found.UpdatedAt.IsZero())
+}
+
 func TestSnapshotCRUD(t *testing.T) {
 	database := setupTestDB(t)
 
