@@ -528,6 +528,53 @@ func TestTimeoutExpiredCommandsMarksCommandAndTask(t *testing.T) {
 	assert.True(t, history.FinishedAt.Equal(now))
 }
 
+func TestRunTimeoutScannerMarksExpiredCommandsAndStopsOnContextCancel(t *testing.T) {
+	database := setupCommandTestDB(t)
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	service := NewService(database, nil)
+	service.Now = func() time.Time { return now }
+	command := createCommandForTest(t, service, "agent-1", protocol.TypeBackupNow)
+	pastDeadline := now.Add(-time.Second)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Updates(map[string]any{
+			"status":      CommandStatusRunning,
+			"deadline_at": &pastDeadline,
+		}).Error)
+	require.NoError(t, database.DB.Model(&db.TaskHistory{}).
+		Where("command_id = ?", command.ID).
+		Update("status", TaskStatusRunning).Error)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.RunTimeoutScanner(ctx, 5*time.Millisecond)
+	}()
+
+	require.Eventually(t, func() bool {
+		var found db.AgentCommand
+		if err := database.DB.First(&found, "id = ?", command.ID).Error; err != nil {
+			return false
+		}
+		return found.Status == CommandStatusTimeout
+	}, 2*time.Second, 10*time.Millisecond)
+
+	cancel()
+	require.Eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, 2*time.Second, 10*time.Millisecond)
+
+	var history db.TaskHistory
+	require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, TaskStatusTimeout, history.Status)
+}
+
 func TestDispatchDoesNotOverwritePolicyAckTerminalState(t *testing.T) {
 	database := setupCommandTestDB(t)
 	hub := newAckingHub("agent-1")
