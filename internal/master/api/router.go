@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
 	"vaultfleet/pkg/protocol"
@@ -25,6 +26,7 @@ type RouterHub interface {
 type RouterConfig struct {
 	Database       *db.Database
 	Hub            RouterHub
+	CommandService *commands.Service
 	EventBus       *events.Bus
 	AgentWebSocket gin.HandlerFunc
 }
@@ -97,6 +99,11 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
+	commandService := cfg.CommandService
+	if commandService == nil {
+		commandService = commands.NewService(cfg.Database, cfg.Hub)
+	}
+
 	authHandler := NewAuthHandler(cfg.Database)
 	agentHandler := NewAgentHandler(cfg.Database)
 	storageHandler := NewConfigHandler(cfg.Database)
@@ -105,7 +112,10 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	browseHandler := NewBrowseHandler(cfg.Database, cfg.Hub)
 	snapshotHandler := NewSnapshotHandler(cfg.Database, cfg.Hub)
 	restoreHandler := NewRestoreHandler(cfg.Database, cfg.Hub)
+	restoreHandler.Commands = commandService
 	taskHandler := NewTaskHandler(cfg.Database, cfg.Hub)
+	taskHandler.Commands = commandService
+	commandHandler := NewCommandHandler(cfg.Database, commandService)
 	notificationHandler := NewNotificationHandler(cfg.Database)
 	systemHandler := NewSystemHandler(cfg.Database)
 
@@ -134,6 +144,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	RegisterSnapshotRoutes(protected, snapshotHandler)
 	RegisterRestoreRoutes(protected, restoreHandler)
 	RegisterTaskRoutes(protected, taskHandler)
+	RegisterCommandRoutes(protected, commandHandler)
 	RegisterNotificationRoutes(protected, notificationHandler)
 	RegisterSystemRoutes(protected.Group("/system"), systemHandler)
 
