@@ -187,8 +187,9 @@ func TestRestoreSendFailureLeavesCommandQueued(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
 	body := parseJSON(t, w)
 	assert.Equal(t, true, body["ok"])
-	assert.Equal(t, "restore started", body["message"])
+	assert.Equal(t, "restore queued", body["message"])
 	data := requireMap(t, body["data"])
+	assert.Equal(t, "restore queued", data["message"])
 
 	var command db.AgentCommand
 	require.NoError(t, setup.database.DB.First(&command, "id = ?", data["command_id"]).Error)

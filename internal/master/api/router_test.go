@@ -33,24 +33,38 @@ func TestRouterAssemblyAuthCheckUninitialized(t *testing.T) {
 func TestRouterAssemblyProtectedRoutesRequireInitBeforeAuth(t *testing.T) {
 	setup := setupRouterAssembly(t)
 
-	w := routerAssemblyRequest(setup.router, http.MethodGet, "/api/agents", nil)
+	for _, path := range protectedRouterAssemblyRoutes() {
+		t.Run(path, func(t *testing.T) {
+			w := routerAssemblyRequest(setup.router, http.MethodGet, path, nil)
 
-	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
-	body := parseJSON(t, w)
-	assert.Equal(t, false, body["ok"])
-	assert.Equal(t, "init_required", body["error"])
+			require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+			body := parseJSON(t, w)
+			assert.Equal(t, false, body["ok"])
+			assert.Equal(t, "init_required", body["error"])
+		})
+	}
 }
 
 func TestRouterAssemblyProtectedRoutesRequireAuthOnceInitialized(t *testing.T) {
 	setup := setupRouterAssembly(t)
 	createRouterAssemblyUser(t, setup.database)
 
-	for _, path := range []string{"/api/agents", "/api/notifications", "/api/system/export"} {
+	for _, path := range protectedRouterAssemblyRoutes() {
 		t.Run(path, func(t *testing.T) {
 			w := routerAssemblyRequest(setup.router, http.MethodGet, path, nil)
 
 			require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
 		})
+	}
+}
+
+func protectedRouterAssemblyRoutes() []string {
+	return []string{
+		"/api/agents",
+		"/api/notifications",
+		"/api/system/export",
+		"/api/commands/command-1",
+		"/api/agents/agent-1/commands",
 	}
 }
 

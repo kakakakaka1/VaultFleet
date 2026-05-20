@@ -80,10 +80,17 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 
 	responseMessage := "restore queued"
 	if h.Hub != nil && h.Hub.IsOnline(agentID) {
-		responseMessage = "restore started"
 		if err := commandService.DispatchPendingForAgent(contextFromGin(c), agentID, 100); err != nil {
 			writeErrorResponse(c, http.StatusInternalServerError, "database error")
 			return
+		}
+		var dispatchedCommand db.AgentCommand
+		if err := h.DB.DB.WithContext(contextFromGin(c)).First(&dispatchedCommand, "id = ?", command.ID).Error; err != nil {
+			writeErrorResponse(c, http.StatusInternalServerError, "database error")
+			return
+		}
+		if dispatchedCommand.Status == commands.CommandStatusRunning {
+			responseMessage = "restore started"
 		}
 	}
 
