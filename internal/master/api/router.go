@@ -43,6 +43,14 @@ type trackedPolicyPush struct {
 	UpdatedAt time.Time
 }
 
+type CurrentPolicyCommand struct {
+	Message         *protocol.Message
+	AgentID         string
+	PolicyID        string
+	StorageID       string
+	PolicyUpdatedAt time.Time
+}
+
 type PolicyCommandCompleter interface {
 	CompletePolicyAck(ctx context.Context, agentID string, messageID string, success bool, errorText string) error
 }
@@ -178,6 +186,24 @@ func CurrentPolicyLookup(database *db.Database) func(agentID string) (*protocol.
 
 func CurrentPolicyLookupWithTracker(database *db.Database, tracker *PolicyPushTracker) func(agentID string) (*protocol.Message, bool) {
 	return func(agentID string) (*protocol.Message, bool) {
+		command, ok := CurrentPolicyCommandLookupWithTracker(database, tracker)(agentID)
+		if !ok || command == nil {
+			return nil, false
+		}
+		return command.Message, true
+	}
+}
+
+func CurrentPolicyCommandLookup(database *db.Database) func(agentID string) (*CurrentPolicyCommand, bool) {
+	return CurrentPolicyCommandLookupWithTracker(database, defaultPolicyPushTracker)
+}
+
+func CurrentPolicyCommandLookupWithTracker(database *db.Database, tracker *PolicyPushTracker) func(agentID string) (*CurrentPolicyCommand, bool) {
+	return func(agentID string) (*CurrentPolicyCommand, bool) {
+		if database == nil || database.DB == nil {
+			return nil, false
+		}
+
 		var policy db.BackupPolicy
 		if err := database.DB.
 			Where("agent_id = ? AND synced = ?", agentID, false).
@@ -201,7 +227,13 @@ func CurrentPolicyLookupWithTracker(database *db.Database, tracker *PolicyPushTr
 			return nil, false
 		}
 		tracker.Track(msg.ID, policy.AgentID, policy.ID, policy.UpdatedAt)
-		return msg, true
+		return &CurrentPolicyCommand{
+			Message:         msg,
+			AgentID:         policy.AgentID,
+			PolicyID:        policy.ID,
+			StorageID:       storage.ID,
+			PolicyUpdatedAt: policy.UpdatedAt,
+		}, true
 	}
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http/httptest"
 	"net/url"
 	"testing"
@@ -79,6 +81,48 @@ func TestBuildRuntimeWiresDurableCommandService(t *testing.T) {
 		require.NoError(t, database.DB.First(&completed, "id = ?", pushed.ID).Error)
 		return completed.Status == commands.CommandStatusSucceeded && completed.CompletedAt != nil
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestRuntimeReconnectPolicyPushIsDurableAndNotDuplicated(t *testing.T) {
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := db.Agent{Name: "Reconnect Agent", AgentToken: "reconnect-token", Status: "offline"}
+	require.NoError(t, database.DB.Create(&agent).Error)
+	storage := db.StorageConfig{
+		Name:         "Reconnect Storage",
+		RcloneType:   "s3",
+		RcloneConfig: encryptMasterTestMap(t, database, `{"provider":"Cloudflare","access_key_id":"AKID","secret_access_key":"SECRET"}`),
+	}
+	require.NoError(t, database.DB.Create(&storage).Error)
+	policy := createMasterTestPolicy(t, database, agent.ID, storage.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runtime := buildRuntime(ctx, database)
+	server := httptest.NewServer(runtime.router)
+	t.Cleanup(server.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial(masterWebSocketURL(server.URL, "reconnect-token"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	var pushed protocol.Message
+	require.NoError(t, conn.ReadJSON(&pushed))
+	require.Equal(t, protocol.TypePolicyPush, pushed.Type)
+
+	var command db.AgentCommand
+	require.NoError(t, database.DB.First(&command, "agent_id = ? AND message_id = ?", agent.ID, pushed.ID).Error)
+	assert.Equal(t, protocol.TypePolicyPush, command.Type)
+	assert.Equal(t, commands.CommandStatusDispatched, command.Status)
+	assert.Equal(t, policy.ID, command.PolicyID)
+	assert.Equal(t, storage.ID, command.StorageID)
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(100*time.Millisecond)))
+	var duplicate protocol.Message
+	err = conn.ReadJSON(&duplicate)
+	require.Error(t, err)
+	var netErr net.Error
+	require.True(t, errors.As(err, &netErr) && netErr.Timeout(), "expected read timeout without duplicate policy_push, got %v", err)
 }
 
 func masterWebSocketURL(serverURL string, token string) string {

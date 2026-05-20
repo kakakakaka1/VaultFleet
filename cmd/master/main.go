@@ -102,16 +102,17 @@ func buildRuntime(ctx context.Context, database *db.Database) masterRuntime {
 		hub,
 		bus,
 		api.AuthenticateAgentByToken(database),
-		policyLookup,
+		nil,
 		api.NewTaskResultProcessor(database),
 	)
 	wsHandler.PolicyAckProcessor = api.NewPolicyAckProcessor(database, commandService)
+	policyPusher := api.NewPolicyChangedPusher(database, hub, policyLookup)
+	policyPusher.Commands = commandService
 	wsHandler.PendingCommandDispatcher = func(agentID string) error {
+		policyPusher.EnsureDurableCommand(context.Background(), agentID)
 		return commandService.DispatchPendingForAgent(ctx, agentID, 20)
 	}
 	wsHandler.AgentStateUpdater = api.NewAgentStateUpdater(database)
-	policyPusher := api.NewPolicyChangedPusher(database, hub, policyLookup)
-	policyPusher.Commands = commandService
 	bus.Subscribe(events.PolicyChanged, policyPusher.Handle)
 	router := api.NewRouter(api.RouterConfig{
 		Database:       database,

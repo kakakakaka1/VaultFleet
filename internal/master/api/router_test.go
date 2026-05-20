@@ -289,6 +289,7 @@ func TestPolicyChangedPusherSendsCurrentPolicyToOnlineAgent(t *testing.T) {
 
 	commandService := commands.NewService(database, hub)
 	pusher := NewPolicyChangedPusher(database, hub, CurrentPolicyLookupWithTracker(database, tracker))
+	pusher.CommandLookup = CurrentPolicyCommandLookupWithTracker(database, tracker)
 	pusher.Commands = commandService
 	pusher.Handle(events.Event{
 		Type: events.PolicyChanged,
@@ -316,6 +317,114 @@ func TestPolicyChangedPusherSendsCurrentPolicyToOnlineAgent(t *testing.T) {
 	assert.Equal(t, sent.ID, command.MessageID)
 }
 
+func TestPolicyChangedPusherDoesNotDuplicateActivePolicyPushCommand(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
+	tracker := NewPolicyPushTracker()
+
+	commandService := commands.NewService(database, hub)
+	pusher := NewPolicyChangedPusher(database, hub, CurrentPolicyLookupWithTracker(database, tracker))
+	pusher.CommandLookup = CurrentPolicyCommandLookupWithTracker(database, tracker)
+	pusher.Commands = commandService
+	event := events.Event{
+		Type: events.PolicyChanged,
+		Payload: map[string]interface{}{
+			"agent_id": agent.ID,
+			"action":   "updated",
+		},
+	}
+
+	pusher.Handle(event)
+	pusher.Handle(event)
+
+	var commandCount int64
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("agent_id = ? AND type = ? AND policy_id = ? AND storage_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID, storage.ID).
+		Count(&commandCount).Error)
+	assert.Equal(t, int64(1), commandCount)
+	assert.Len(t, hub.sent, 1)
+}
+
+func TestPolicyChangedPusherCommandRefsMatchPolicyPayloadAndTrackerMessage(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent := createStorageTestAgent(t, database, "Tokyo-1")
+	storageA := db.StorageConfig{
+		Name:       "Storage A",
+		RcloneType: "s3",
+		RcloneConfig: mustEncryptMap(t, database, map[string]any{
+			"provider":          "Cloudflare",
+			"access_key_id":     "AKID-A",
+			"secret_access_key": "SECRET-A",
+			"bucket":            "bucket-a",
+		}),
+	}
+	require.NoError(t, database.DB.Create(&storageA).Error)
+	storageB := db.StorageConfig{
+		Name:       "Storage B",
+		RcloneType: "s3",
+		RcloneConfig: mustEncryptMap(t, database, map[string]any{
+			"provider":          "Other",
+			"access_key_id":     "AKID-B",
+			"secret_access_key": "SECRET-B",
+			"bucket":            "bucket-b",
+		}),
+	}
+	require.NoError(t, database.DB.Create(&storageB).Error)
+	policyA := createStorageTestPolicy(t, database, agent.ID, storageA.ID, false)
+	var policyB db.BackupPolicy
+	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
+	tracker := NewPolicyPushTracker()
+	previousDefaultTracker := defaultPolicyPushTracker
+	defaultPolicyPushTracker = tracker
+	defer func() {
+		defaultPolicyPushTracker = previousDefaultTracker
+	}()
+	lookup := func(agentID string) (*protocol.Message, bool) {
+		msg, ok := CurrentPolicyLookupWithTracker(database, tracker)(agentID)
+		policyB = createStorageTestPolicy(t, database, agent.ID, storageB.ID, false)
+		require.NoError(t, database.DB.Model(&policyB).Update("updated_at", time.Now().Add(time.Hour)).Error)
+		return msg, ok
+	}
+
+	commandService := commands.NewService(database, hub)
+	pusher := NewPolicyChangedPusher(database, hub, lookup)
+	pusher.Commands = commandService
+	pusher.Handle(events.Event{
+		Type: events.PolicyChanged,
+		Payload: map[string]interface{}{
+			"agent_id": agent.ID,
+			"action":   "updated",
+		},
+	})
+
+	require.Len(t, hub.sent, 1)
+	sent := hub.sent[0].message
+	payload, err := protocol.ParsePayload[protocol.PolicyPushPayload](&sent)
+	require.NoError(t, err)
+
+	var command db.AgentCommand
+	require.NoError(t, database.DB.First(&command, "agent_id = ? AND message_id = ?", agent.ID, sent.ID).Error)
+	switch command.StorageID {
+	case storageA.ID:
+		assert.Equal(t, policyA.ID, command.PolicyID)
+		assert.Equal(t, "bucket-a/vaultfleet/"+agent.ID, payload.Storage.RepoPath)
+		assert.Equal(t, "AKID-A", payload.Storage.RcloneConfig["access_key_id"])
+	case storageB.ID:
+		require.NotEmpty(t, policyB.ID)
+		assert.Equal(t, policyB.ID, command.PolicyID)
+		assert.Equal(t, "bucket-b/vaultfleet/"+agent.ID, payload.Storage.RepoPath)
+		assert.Equal(t, "AKID-B", payload.Storage.RcloneConfig["access_key_id"])
+	default:
+		t.Fatalf("command storage %q did not match a fixture", command.StorageID)
+	}
+	tracked, ok := tracker.Get(sent.ID, agent.ID)
+	require.True(t, ok)
+	assert.Equal(t, command.PolicyID, tracked.PolicyID)
+	assert.Equal(t, sent.ID, command.MessageID)
+}
+
 func TestPolicyAckProcessorCompletesPolicyPushCommand(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
@@ -324,6 +433,7 @@ func TestPolicyAckProcessorCompletesPolicyPushCommand(t *testing.T) {
 	tracker := NewPolicyPushTracker()
 	commandService := commands.NewService(database, hub)
 	pusher := NewPolicyChangedPusher(database, hub, CurrentPolicyLookupWithTracker(database, tracker))
+	pusher.CommandLookup = CurrentPolicyCommandLookupWithTracker(database, tracker)
 	pusher.Commands = commandService
 	pusher.Handle(events.Event{
 		Type: events.PolicyChanged,
