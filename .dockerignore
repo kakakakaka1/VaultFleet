@@ -5,6 +5,7 @@
 bin/
 data/
 master
+.playwright-cli/
 
 *.db
 *.db-shm
@@ -16,3 +17,8 @@ master
 **/*.db-wal
 **/*.log
 **/*.tmp
+
+web/node_modules/
+web/tsconfig.tsbuildinfo
+internal/master/api/frontend_dist/*
+!internal/master/api/frontend_dist/index.html

@@ -1,11 +1,17 @@
 # Makefile
-.PHONY: build-master build-agent build-all test docker-build clean
+.PHONY: frontend-install frontend-build build-master build-agent build-all test docker-build clean
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 IMAGE ?= ghcr.io/momo-z/vaultfleet
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 
-build-master:
+frontend-install:
+	cd web && npm install
+
+frontend-build:
+	cd web && npm run build
+
+build-master: frontend-build
 	CGO_ENABLED=1 go build $(LDFLAGS) -o bin/vaultfleet-master ./cmd/master
 
 build-agent:

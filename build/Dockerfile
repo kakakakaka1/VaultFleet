@@ -1,5 +1,15 @@
 # build/Dockerfile
-# Stage 1: Build
+# Stage 1: Frontend build
+FROM node:24-bookworm-slim AS frontend
+
+WORKDIR /src
+COPY web/package.json web/package-lock.json ./web/
+RUN cd web && npm ci
+
+COPY web ./web
+RUN cd web && npm run build
+
+# Stage 2: Go build
 FROM golang:1.26.3-bookworm AS builder
 
 RUN apt-get update && apt-get install -y gcc libc6-dev && rm -rf /var/lib/apt/lists/*
@@ -9,9 +19,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+COPY --from=frontend /src/internal/master/api/frontend_dist ./internal/master/api/frontend_dist
 RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /bin/vaultfleet-master ./cmd/master
 
-# Stage 2: Runtime
+# Stage 3: Runtime
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive

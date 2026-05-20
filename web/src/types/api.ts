@@ -11,6 +11,7 @@ export interface AuthUser {
 export interface AuthCheck {
   authenticated: boolean;
   initialized: boolean;
+  username?: string;
   user?: AuthUser;
 }
 
