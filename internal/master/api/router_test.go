@@ -390,8 +390,18 @@ func TestPolicyChangedPusherDoesNotDuplicateConcurrentActivePolicyPushCommands(t
 
 func TestPolicyChangedPusherCreatesNewCommandForUpdatedPolicyVersion(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
-	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
-	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	agent, oldStorage := createRouterAssemblyPolicyFixtures(t, database)
+	newStorage := db.StorageConfig{
+		Name:       "New Storage",
+		RcloneType: "s3",
+		RcloneConfig: mustEncryptMap(t, database, map[string]any{
+			"provider":          "Cloudflare",
+			"access_key_id":     "NEWID123",
+			"secret_access_key": "NEWSECRET456",
+		}),
+	}
+	require.NoError(t, database.DB.Create(&newStorage).Error)
+	policy := createStorageTestPolicy(t, database, agent.ID, oldStorage.ID, false)
 	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
 	tracker := NewPolicyPushTracker()
 	commandService := commands.NewService(database, hub)
@@ -415,6 +425,7 @@ func TestPolicyChangedPusherCreatesNewCommandForUpdatedPolicyVersion(t *testing.
 	require.NoError(t, database.DB.Model(&policy).Updates(map[string]any{
 		"updated_at": newVersion,
 		"schedule":   "0 4 * * *",
+		"storage_id": newStorage.ID,
 	}).Error)
 	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
 		Where("id = ?", first.ID).
@@ -424,7 +435,7 @@ func TestPolicyChangedPusherCreatesNewCommandForUpdatedPolicyVersion(t *testing.
 
 	var commandCount int64
 	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
-		Where("agent_id = ? AND type = ? AND policy_id = ? AND storage_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID, storage.ID).
+		Where("agent_id = ? AND type = ? AND policy_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID).
 		Count(&commandCount).Error)
 	assert.Equal(t, int64(2), commandCount)
 
@@ -436,6 +447,7 @@ func TestPolicyChangedPusherCreatesNewCommandForUpdatedPolicyVersion(t *testing.
 	var second db.AgentCommand
 	require.NoError(t, database.DB.Where("agent_id = ? AND type = ? AND policy_id = ? AND policy_updated_at = ?", agent.ID, protocol.TypePolicyPush, policy.ID, newVersion).
 		First(&second).Error)
+	assert.Equal(t, newStorage.ID, second.StorageID)
 	require.NotNil(t, second.PolicyUpdatedAt)
 	assert.True(t, second.PolicyUpdatedAt.Equal(newVersion))
 }
@@ -655,20 +667,34 @@ func TestPolicyAckProcessorFailedAckConsumesTrackedPush(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
 	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
-
+	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
 	tracker := NewPolicyPushTracker()
-	pushed, ok := CurrentPolicyLookupWithTracker(database, tracker)(agent.ID)
-	require.True(t, ok)
+	commandService := commands.NewService(database, hub)
+	pusher := NewPolicyChangedPusher(database, hub, nil)
+	pusher.CommandLookup = CurrentPolicyCommandLookupWithTracker(database, tracker)
+	pusher.Commands = commandService
+	pusher.Handle(events.Event{
+		Type: events.PolicyChanged,
+		Payload: map[string]interface{}{
+			"agent_id": agent.ID,
+			"action":   "updated",
+		},
+	})
+	require.Len(t, hub.sent, 1)
+	messageID := hub.sent[0].message.ID
 
-	failed := policyAckMessageWithID(t, pushed.ID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: false, Error: "temporary"})
-	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker)(agent.ID, *failed))
+	failed := policyAckMessageWithID(t, messageID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: false, Error: "temporary"})
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker, commandService)(agent.ID, *failed))
 
-	success := policyAckMessageWithID(t, pushed.ID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
-	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker)(agent.ID, *success))
+	success := policyAckMessageWithID(t, messageID, protocol.PolicyAckPayload{AgentID: agent.ID, Success: true})
+	require.NoError(t, NewPolicyAckProcessorWithTracker(database, tracker, commandService)(agent.ID, *success))
 
 	var stored db.BackupPolicy
 	require.NoError(t, database.DB.First(&stored, "id = ?", policy.ID).Error)
 	assert.False(t, stored.Synced)
+	var command db.AgentCommand
+	require.NoError(t, database.DB.First(&command, "agent_id = ? AND message_id = ?", agent.ID, messageID).Error)
+	assert.Equal(t, commands.CommandStatusFailed, command.Status)
 }
 
 func TestPolicyAckProcessorUsesAuthenticatedAgentIDOverPayloadAgentID(t *testing.T) {

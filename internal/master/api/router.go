@@ -247,13 +247,13 @@ func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPush
 		if err != nil {
 			return err
 		}
-		var completerErr error
-		if len(completer) > 0 && completer[0] != nil {
-			completerErr = completer[0].CompletePolicyAck(context.Background(), agentID, msg.ID, ack.Success, ack.Error)
-		}
 		tracked, ok := tracker.Get(msg.ID, agentID)
 		if !ok {
 			tracked, ok = durableTrackedPolicyPush(database, agentID, msg.ID)
+		}
+		var completerErr error
+		if len(completer) > 0 && completer[0] != nil {
+			completerErr = completer[0].CompletePolicyAck(context.Background(), agentID, msg.ID, ack.Success, ack.Error)
 		}
 		if !ok {
 			return completerErr
@@ -280,6 +280,9 @@ func durableTrackedPolicyPush(database *db.Database, agentID string, messageID s
 	}
 	var command db.AgentCommand
 	if err := database.DB.First(&command, "agent_id = ? AND message_id = ? AND type = ?", agentID, messageID, protocol.TypePolicyPush).Error; err != nil {
+		return trackedPolicyPush{}, false
+	}
+	if command.Status != commands.CommandStatusPending && command.Status != commands.CommandStatusDispatched && command.Status != commands.CommandStatusRunning {
 		return trackedPolicyPush{}, false
 	}
 	if command.PolicyID == "" || command.PolicyUpdatedAt == nil {

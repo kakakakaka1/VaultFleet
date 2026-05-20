@@ -103,11 +103,10 @@ func (p *PolicyChangedPusher) retireSupersededPolicyPushCommands(agentID string,
 	}
 	result := p.DB.DB.Model(&db.AgentCommand{}).
 		Where(
-			"agent_id = ? AND type = ? AND policy_id = ? AND storage_id = ? AND status IN ? AND (policy_updated_at IS NULL OR policy_updated_at <> ?)",
+			"agent_id = ? AND type = ? AND policy_id = ? AND status IN ? AND (policy_updated_at IS NULL OR policy_updated_at <> ?)",
 			agentID,
 			protocol.TypePolicyPush,
 			policyID,
-			storageID,
 			[]string{commands.CommandStatusPending, commands.CommandStatusDispatched, commands.CommandStatusRunning},
 			policyUpdatedAt,
 		).

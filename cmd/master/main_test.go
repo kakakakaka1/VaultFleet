@@ -47,9 +47,11 @@ func TestBuildRuntimeWiresDurableCommandService(t *testing.T) {
 	require.NoError(t, conn.ReadJSON(&queuedPush))
 	assert.Equal(t, queued.MessageID, queuedPush.ID)
 
-	var dispatched db.AgentCommand
-	require.NoError(t, database.DB.First(&dispatched, "id = ?", queued.ID).Error)
-	assert.Equal(t, commands.CommandStatusDispatched, dispatched.Status)
+	require.Eventually(t, func() bool {
+		var dispatched db.AgentCommand
+		require.NoError(t, database.DB.First(&dispatched, "id = ?", queued.ID).Error)
+		return dispatched.Status == commands.CommandStatusDispatched
+	}, time.Second, 10*time.Millisecond)
 
 	storage := db.StorageConfig{
 		Name:         "Runtime Storage",
