@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Copy, Check } from "lucide-react";
+import { copyToClipboard } from "@/lib/utils";
 
 type ScriptSource = "github" | "github-proxy" | "master";
 
@@ -16,7 +17,7 @@ const GITHUB_RAW_URL =
 export function InstallCommand({ enrollToken }: InstallCommandProps) {
   const [scriptSource, setScriptSource] = useState<ScriptSource>("github");
   const [masterHost, setMasterHost] = useState(window.location.origin);
-  const [githubProxy, setGithubProxy] = useState("https://ghgo.xyz/");
+  const [githubProxy, setGithubProxy] = useState("https://hk.gh-proxy.org/");
   const [copied, setCopied] = useState(false);
 
   const buildCommand = (): string => {
@@ -47,10 +48,11 @@ export function InstallCommand({ enrollToken }: InstallCommandProps) {
 
   const command = buildCommand();
 
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(command);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = () => {
+    copyToClipboard(command).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
   };
 
   return (
@@ -99,7 +101,7 @@ export function InstallCommand({ enrollToken }: InstallCommandProps) {
             id="github-proxy"
             value={githubProxy}
             onChange={(e) => setGithubProxy(e.target.value)}
-            placeholder="https://ghgo.xyz/"
+            placeholder="https://hk.gh-proxy.org/"
           />
         </div>
       )}
@@ -129,7 +131,7 @@ export function InstallCommand({ enrollToken }: InstallCommandProps) {
             size="icon"
             variant="ghost"
             className="absolute top-2 right-2 h-8 w-8"
-            onClick={copyToClipboard}
+            onClick={handleCopy}
           >
             {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
           </Button>

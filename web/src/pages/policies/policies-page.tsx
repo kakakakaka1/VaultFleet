@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { listPolicies, createPolicy, updatePolicy, deletePolicy } from "@/services/policies";
 import { listAgents } from "@/services/agents";
 import { listStorage } from "@/services/storage";
+import { copyToClipboard } from "@/lib/utils";
 import { BackupPolicy, PolicyInput } from "@/types/policy";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -165,9 +166,10 @@ export function PoliciesPage() {
                     variant="ghost"
                     className="absolute top-2 right-2 h-8 w-8"
                     onClick={() => {
-                      navigator.clipboard.writeText(generatedPassword);
-                      setCopied(true);
-                      setTimeout(() => setCopied(false), 2000);
+                      copyToClipboard(generatedPassword).then(() => {
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 2000);
+                      });
                     }}
                   >
                     {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}

@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getAgent, backupNow } from "@/services/agents";
 import { listPolicies } from "@/services/policies";
+import { copyToClipboard } from "@/lib/utils";
 import { listTasks } from "@/services/tasks";
 import { listSnapshots, restoreSnapshot } from "@/services/snapshots";
 import { listAgentCommands } from "@/services/commands";
@@ -398,7 +399,7 @@ export function NodeDetailPage() {
                 <DirectoryBrowser 
                   agentId={agent.id} 
                   onSelect={(path) => {
-                    navigator.clipboard.writeText(path);
+                    copyToClipboard(path);
                     toast.success(`路径已复制: ${path}`);
                   }} 
                 />
