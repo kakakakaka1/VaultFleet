@@ -86,6 +86,7 @@ export function NodeDetailPage() {
         toast.info("备份命令已排队", { description: "Agent 上线后将自动执行" });
       }
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["commands"] });
     },
     onError: (error: any) => {
       toast.error("发起备份失败", { description: error.message });
@@ -153,11 +154,12 @@ export function NodeDetailPage() {
       </div>
 
       <Tabs defaultValue="overview" className="w-full">
-        <TabsList className="grid w-full grid-cols-5 lg:w-[600px]">
+        <TabsList className="grid w-full grid-cols-6 lg:w-[720px]">
           <TabsTrigger value="overview">概览</TabsTrigger>
           <TabsTrigger value="policy">策略</TabsTrigger>
           <TabsTrigger value="snapshots">快照</TabsTrigger>
           <TabsTrigger value="tasks">任务</TabsTrigger>
+          <TabsTrigger value="commands">命令</TabsTrigger>
           <TabsTrigger value="browser">文件浏览</TabsTrigger>
         </TabsList>
         

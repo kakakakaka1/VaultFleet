@@ -28,6 +28,13 @@ export function TasksPage() {
   const { data: tasks, isLoading, refetch, isFetching } = useQuery({
     queryKey: ["tasks", filters],
     queryFn: () => listTasks(filters),
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const hasActive = data?.some(
+        (t) => t.status === "pending" || t.status === "running"
+      );
+      return hasActive ? 5000 : false;
+    },
   });
 
   const { data: agents } = useQuery({ queryKey: ["agents"], queryFn: listAgents });
@@ -88,9 +95,11 @@ export function TasksPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部状态</SelectItem>
+              <SelectItem value="pending">等待中</SelectItem>
+              <SelectItem value="running">运行中</SelectItem>
               <SelectItem value="success">成功</SelectItem>
               <SelectItem value="failed">失败</SelectItem>
-              <SelectItem value="running">运行中</SelectItem>
+              <SelectItem value="timeout">超时</SelectItem>
             </SelectContent>
           </Select>
         </div>
