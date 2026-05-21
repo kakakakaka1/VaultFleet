@@ -150,6 +150,7 @@ func (s *Snapshot) BeforeCreate(tx *gorm.DB) error {
 
 type NotificationConfig struct {
 	ID        string    `gorm:"type:text;primaryKey" json:"id"`
+	Name      string    `gorm:"type:text" json:"name"`
 	Type      string    `gorm:"type:text;not null" json:"type"`
 	Config    string    `gorm:"type:text" json:"config"`
 	Events    string    `gorm:"type:text" json:"events"`

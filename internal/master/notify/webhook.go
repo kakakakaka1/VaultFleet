@@ -40,18 +40,14 @@ func (n *WebhookNotifier) Send(ctx context.Context, msg NotifyMessage) error {
 		return fmt.Errorf("marshal webhook message: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.url, bytes.NewReader(data))
+	resp, err := n.sendToURL(ctx, n.url, data)
 	if err != nil {
-		return fmt.Errorf("create webhook request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for key, value := range n.headers {
-		req.Header.Set(key, value)
-	}
-
-	resp, err := n.client.Do(req)
-	if err != nil {
-		return sanitizedSendError{op: "send webhook message", err: err}
+		if fallbackURL, ok := dockerHostFallbackURL(n.url); ok {
+			resp, err = n.sendToURL(ctx, fallbackURL, data)
+		}
+		if err != nil {
+			return sanitizedSendError{op: "send webhook message", err: err}
+		}
 	}
 	defer resp.Body.Close()
 
@@ -60,6 +56,18 @@ func (n *WebhookNotifier) Send(ctx context.Context, msg NotifyMessage) error {
 	}
 
 	return nil
+}
+
+func (n *WebhookNotifier) sendToURL(ctx context.Context, targetURL string, data []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("create webhook request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for key, value := range n.headers {
+		req.Header.Set(key, value)
+	}
+	return n.client.Do(req)
 }
 
 func (n *WebhookNotifier) Type() string {
@@ -78,6 +86,24 @@ func validateWebhookURL(rawURL string) error {
 		return fmt.Errorf("webhook url host is required")
 	}
 	return nil
+}
+
+func dockerHostFallbackURL(rawURL string) (string, bool) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+	default:
+		return "", false
+	}
+	port := parsed.Port()
+	parsed.Host = "host.docker.internal"
+	if port != "" {
+		parsed.Host += ":" + port
+	}
+	return parsed.String(), true
 }
 
 func validateWebhookHeaders(headers map[string]string) error {

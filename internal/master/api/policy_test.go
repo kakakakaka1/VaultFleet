@@ -65,7 +65,7 @@ func TestCreatePolicy(t *testing.T) {
 	assert.Equal(t, agent.ID, body["agent_id"])
 	assert.Equal(t, storage.ID, body["storage_id"])
 	assert.Equal(t, "vaultfleet/"+agent.ID, body["repo_path"])
-	assert.NotEmpty(t, body["restic_password"])
+	assert.NotContains(t, body, "restic_password")
 	assert.Equal(t, false, body["synced"])
 	assertJSONList(t, body["backup_dirs"], []string{"/etc", "/home"})
 	assertJSONList(t, body["exclude_patterns"], []string{"*.log", "*.tmp"})
@@ -78,7 +78,6 @@ func TestCreatePolicy(t *testing.T) {
 	assert.Equal(t, `["/etc","/home"]`, stored.BackupDirs)
 	assert.Equal(t, `["*.log","*.tmp"]`, stored.ExcludePatterns)
 	assert.JSONEq(t, `{"keep_last":3,"keep_daily":7,"keep_weekly":4,"keep_monthly":6}`, stored.Retention)
-	assert.NotContains(t, stored.ResticPassword, body["restic_password"].(string))
 	assert.NotEmpty(t, stored.ResticPassword)
 }
 
@@ -125,7 +124,7 @@ func TestCreatePolicyWithProvidedRepoPathAndPassword(t *testing.T) {
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 	body := parseJSON(t, w)
 	assert.Equal(t, "custom/repo", body["repo_path"])
-	assert.Equal(t, "provided-secret", body["restic_password"])
+	assert.NotContains(t, body, "restic_password")
 
 	var stored db.BackupPolicy
 	require.NoError(t, setup.database.DB.First(&stored, "id = ?", body["id"]).Error)
@@ -138,14 +137,11 @@ func TestCreatePolicyAutoGeneratesPassword(t *testing.T) {
 	storage := createPolicyTestStorage(t, setup.database)
 
 	created := createPolicy(t, setup.router, agent.ID, storage.ID)
-	password := created["restic_password"].(string)
-
-	assert.GreaterOrEqual(t, len(password), 32)
+	assert.NotContains(t, created, "restic_password")
 
 	var stored db.BackupPolicy
 	require.NoError(t, setup.database.DB.First(&stored, "id = ?", created["id"]).Error)
-	assert.NotEqual(t, password, stored.ResticPassword)
-	assert.NotContains(t, stored.ResticPassword, password)
+	assert.NotEmpty(t, stored.ResticPassword)
 }
 
 func TestCreatePolicyValidatesReferencedAgentAndStorage(t *testing.T) {

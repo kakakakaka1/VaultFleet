@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -29,7 +30,12 @@ type agentResponse struct {
 	Name       string     `json:"name"`
 	Status     string     `json:"status"`
 	LastSeenAt *time.Time `json:"last_seen_at"`
+	LastSeen   *time.Time `json:"last_seen"`
 	SystemInfo string     `json:"system_info"`
+	Hostname   string     `json:"hostname"`
+	OS         string     `json:"os"`
+	Arch       string     `json:"arch"`
+	Version    string     `json:"version"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 }
@@ -163,15 +169,37 @@ func (h *AgentHandler) findAgentByID(c *gin.Context, id string) (db.Agent, bool)
 }
 
 func newAgentResponse(agent db.Agent) agentResponse {
+	systemInfo := parseAgentSystemInfo(agent.SystemInfo)
 	return agentResponse{
 		ID:         agent.ID,
 		Name:       agent.Name,
 		Status:     agent.Status,
 		LastSeenAt: agent.LastSeenAt,
+		LastSeen:   agent.LastSeenAt,
 		SystemInfo: agent.SystemInfo,
+		Hostname:   systemInfo.Hostname,
+		OS:         systemInfo.OS,
+		Arch:       systemInfo.Arch,
+		Version:    systemInfo.Version,
 		CreatedAt:  agent.CreatedAt,
 		UpdatedAt:  agent.UpdatedAt,
 	}
+}
+
+type agentSystemInfo struct {
+	Hostname string `json:"hostname"`
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	Version  string `json:"version"`
+}
+
+func parseAgentSystemInfo(raw string) agentSystemInfo {
+	var info agentSystemInfo
+	if raw == "" {
+		return info
+	}
+	_ = json.Unmarshal([]byte(raw), &info)
+	return info
 }
 
 func agentResponses(agents []db.Agent) []agentResponse {

@@ -90,6 +90,9 @@ func (h *HealthHandler) writeMetrics(c *gin.Context, buf *bytes.Buffer) error {
 		Scan(&commandRows).Error; err != nil {
 		return err
 	}
+	if len(commandRows) == 0 {
+		fmt.Fprintln(buf, "vaultfleet_agent_commands_total 0")
+	}
 	for _, row := range commandRows {
 		fmt.Fprintf(buf, "vaultfleet_agent_commands_total{status=%q,type=%q} %d\n", row.Status, row.Type, row.Count)
 	}
@@ -102,6 +105,9 @@ func (h *HealthHandler) writeMetrics(c *gin.Context, buf *bytes.Buffer) error {
 		Order("status, type").
 		Scan(&taskRows).Error; err != nil {
 		return err
+	}
+	if len(taskRows) == 0 {
+		fmt.Fprintln(buf, "vaultfleet_tasks_total 0")
 	}
 	for _, row := range taskRows {
 		fmt.Fprintf(buf, "vaultfleet_tasks_total{status=%q,type=%q} %d\n", row.Status, row.Type, row.Count)

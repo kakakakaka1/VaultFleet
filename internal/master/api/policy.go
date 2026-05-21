@@ -53,7 +53,6 @@ type policyResponse struct {
 	AgentID         string         `json:"agent_id"`
 	StorageID       string         `json:"storage_id"`
 	RepoPath        string         `json:"repo_path"`
-	ResticPassword  string         `json:"restic_password,omitempty"`
 	BackupDirs      []string       `json:"backup_dirs"`
 	ExcludePatterns []string       `json:"exclude_patterns"`
 	Schedule        string         `json:"schedule"`
@@ -134,7 +133,7 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 	}
 
 	h.publishPolicyChanged(policy.AgentID, "created")
-	h.writePolicyResponse(c, http.StatusCreated, policy, resticPassword)
+	h.writePolicyResponse(c, http.StatusCreated, policy)
 }
 
 func (h *PolicyHandler) ListPolicies(c *gin.Context) {
@@ -151,7 +150,7 @@ func (h *PolicyHandler) ListPolicies(c *gin.Context) {
 
 	responses := make([]policyResponse, 0, len(policies))
 	for _, policy := range policies {
-		response, err := newPolicyResponse(policy, "")
+		response, err := newPolicyResponse(policy)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "decode policy"})
 			return
@@ -168,7 +167,7 @@ func (h *PolicyHandler) GetPolicy(c *gin.Context) {
 		return
 	}
 
-	h.writePolicyResponse(c, http.StatusOK, policy, "")
+	h.writePolicyResponse(c, http.StatusOK, policy)
 }
 
 func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
@@ -222,7 +221,7 @@ func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 
 	h.publishPolicyChanged(policy.AgentID, "updated")
 
-	h.writePolicyResponse(c, http.StatusOK, policy, "")
+	h.writePolicyResponse(c, http.StatusOK, policy)
 }
 
 func (h *PolicyHandler) DeletePolicy(c *gin.Context) {
@@ -283,8 +282,8 @@ func (h *PolicyHandler) storageExists(c *gin.Context, id string) bool {
 	return true
 }
 
-func (h *PolicyHandler) writePolicyResponse(c *gin.Context, status int, policy db.BackupPolicy, plainPassword string) {
-	response, err := newPolicyResponse(policy, plainPassword)
+func (h *PolicyHandler) writePolicyResponse(c *gin.Context, status int, policy db.BackupPolicy) {
+	response, err := newPolicyResponse(policy)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "decode policy"})
 		return
@@ -307,7 +306,7 @@ func (h *PolicyHandler) publishPolicyChanged(agentID string, action string) {
 	})
 }
 
-func newPolicyResponse(policy db.BackupPolicy, plainPassword string) (policyResponse, error) {
+func newPolicyResponse(policy db.BackupPolicy) (policyResponse, error) {
 	var backupDirs []string
 	if err := json.Unmarshal([]byte(policy.BackupDirs), &backupDirs); err != nil {
 		return policyResponse{}, err
@@ -330,7 +329,6 @@ func newPolicyResponse(policy db.BackupPolicy, plainPassword string) (policyResp
 		AgentID:         policy.AgentID,
 		StorageID:       policy.StorageID,
 		RepoPath:        policy.RepoPath,
-		ResticPassword:  plainPassword,
 		BackupDirs:      backupDirs,
 		ExcludePatterns: excludePatterns,
 		Schedule:        policy.Schedule,

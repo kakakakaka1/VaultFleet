@@ -10,8 +10,6 @@ import { StatusBadge } from "@/components/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { format } from "date-fns";
-import { zhCN } from "date-fns/locale";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DirectoryBrowser } from "@/components/directory-browser";
 import { Button } from "@/components/ui/button";
@@ -23,6 +21,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { safeFormatDate } from "@/lib/date";
 
 const COMMAND_TYPE_LABELS: Record<string, string> = {
   backup_now: "手动备份",
@@ -182,8 +181,8 @@ export function NodeDetailPage() {
               </CardHeader>
               <CardContent className="text-sm space-y-2">
                 <div className="flex justify-between"><span className="text-muted-foreground">当前状态</span><StatusBadge status={agent.status} /></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">最后在线</span><span>{agent.last_seen ? format(new Date(agent.last_seen), "yyyy-MM-dd HH:mm:ss", { locale: zhCN }) : "从未"}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">创建时间</span><span>{format(new Date(agent.created_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN })}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">最后在线</span><span>{safeFormatDate(agent.last_seen, "yyyy-MM-dd HH:mm:ss", "从未")}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">创建时间</span><span>{safeFormatDate(agent.created_at, "yyyy-MM-dd HH:mm:ss")}</span></div>
               </CardContent>
             </Card>
           </div>
@@ -231,7 +230,7 @@ export function NodeDetailPage() {
                 {snapshots?.map((s) => (
                   <TableRow key={s.id}>
                     <TableCell className="font-mono text-xs">{s.id.substring(0, 8)}</TableCell>
-                    <TableCell className="text-xs">{format(new Date(s.time), "yyyy-MM-dd HH:mm:ss", { locale: zhCN })}</TableCell>
+                    <TableCell className="text-xs">{safeFormatDate(s.time, "yyyy-MM-dd HH:mm:ss")}</TableCell>
                     <TableCell className="text-xs truncate max-w-[300px]">{s.paths.join(", ")}</TableCell>
                     <TableCell className="text-right">
                       <Button variant="ghost" size="sm" className="text-primary" onClick={() => handleRestoreClick(s)}>
@@ -274,7 +273,7 @@ export function NodeDetailPage() {
                       </TableCell>
                       <TableCell>{t.type === "backup" ? "备份" : "恢复"}</TableCell>
                       <TableCell><StatusBadge status={t.status} /></TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{format(new Date(t.created_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN })}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{safeFormatDate(t.created_at, "yyyy-MM-dd HH:mm:ss")}</TableCell>
                       <TableCell className="text-right">
                         <Button variant="ghost" size="sm" className="text-primary" onClick={() => setExpandedTaskId(expandedTaskId === t.id ? null : t.id)}>
                           详情
@@ -304,11 +303,11 @@ export function NodeDetailPage() {
                               )}
                               <div className="flex items-center gap-2">
                                 <span className="font-semibold w-24">开始时间:</span>
-                                <span>{t.started_at ? format(new Date(t.started_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN }) : "-"}</span>
+                                <span>{safeFormatDate(t.started_at, "yyyy-MM-dd HH:mm:ss")}</span>
                               </div>
                               <div className="flex items-center gap-2">
                                 <span className="font-semibold w-24">结束时间:</span>
-                                <span>{t.finished_at ? format(new Date(t.finished_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN }) : "-"}</span>
+                                <span>{safeFormatDate(t.finished_at, "yyyy-MM-dd HH:mm:ss")}</span>
                               </div>
                             </div>
                             <div className="space-y-2">
@@ -378,8 +377,8 @@ export function NodeDetailPage() {
                     <TableCell className="font-medium">{COMMAND_TYPE_LABELS[c.type] || c.type}</TableCell>
                     <TableCell><StatusBadge status={c.status} /></TableCell>
                     <TableCell>{c.attempts}</TableCell>
-                    <TableCell className="text-xs">{format(new Date(c.created_at), "MM-dd HH:mm:ss", { locale: zhCN })}</TableCell>
-                    <TableCell className="text-xs">{c.completed_at ? format(new Date(c.completed_at), "MM-dd HH:mm:ss", { locale: zhCN }) : "-"}</TableCell>
+                    <TableCell className="text-xs">{safeFormatDate(c.created_at, "MM-dd HH:mm:ss")}</TableCell>
+                    <TableCell className="text-xs">{safeFormatDate(c.completed_at, "MM-dd HH:mm:ss")}</TableCell>
                     <TableCell className="text-xs text-red-500 max-w-[150px] truncate" title={c.error_message}>{c.error_message || "-"}</TableCell>
                   </TableRow>
                 )) || <TableRow><TableCell colSpan={6} className="text-center py-4">暂无命令</TableCell></TableRow>}

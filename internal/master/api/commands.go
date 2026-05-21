@@ -27,6 +27,7 @@ type commandResponse struct {
 	MessageID       string     `json:"message_id"`
 	Result          string     `json:"result,omitempty"`
 	ErrorMessage    string     `json:"error_message,omitempty"`
+	Error           string     `json:"error,omitempty"`
 	Attempts        int        `json:"attempts"`
 	PolicyID        string     `json:"policy_id,omitempty"`
 	PolicyUpdatedAt *time.Time `json:"policy_updated_at,omitempty"`
@@ -114,6 +115,7 @@ func newCommandResponse(command db.AgentCommand) commandResponse {
 		MessageID:       command.MessageID,
 		Result:          command.Result,
 		ErrorMessage:    command.ErrorMessage,
+		Error:           command.ErrorMessage,
 		Attempts:        command.Attempts,
 		PolicyID:        command.PolicyID,
 		PolicyUpdatedAt: command.PolicyUpdatedAt,

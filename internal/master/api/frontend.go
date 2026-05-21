@@ -18,6 +18,10 @@ func RegisterFrontendRoutes(r *gin.Engine) {
 		panic(err)
 	}
 
+	r.GET("/favicon.ico", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
 	// Serve assets
 	// Built files are in frontend_dist/assets/*
 	// HTML references them as /assets/*
@@ -30,7 +34,8 @@ func RegisterFrontendRoutes(r *gin.Engine) {
 
 	// Serve index.html for all other routes (SPA)
 	r.NoRoute(func(c *gin.Context) {
-		if isBackendRoute(c.Request.URL.Path) {
+		path := c.Request.URL.Path
+		if isBackendRoute(path) || !isFrontendRoute(path) {
 			c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "not found"})
 			return
 		}
@@ -48,4 +53,19 @@ func isBackendRoute(path string) bool {
 	return path == "/api" || strings.HasPrefix(path, "/api/") ||
 		path == "/ws" || strings.HasPrefix(path, "/ws/") ||
 		path == "/install.sh" || strings.HasPrefix(path, "/download/")
+}
+
+func isFrontendRoute(path string) bool {
+	return path == "/" ||
+		path == "/dashboard" ||
+		path == "/nodes" ||
+		strings.HasPrefix(path, "/nodes/") ||
+		path == "/storage" ||
+		path == "/policies" ||
+		path == "/tasks" ||
+		path == "/snapshots" ||
+		path == "/notifications" ||
+		path == "/system" ||
+		path == "/login" ||
+		path == "/setup"
 }

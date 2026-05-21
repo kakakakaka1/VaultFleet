@@ -113,6 +113,23 @@ func TestMetricsOutputsPrometheusText(t *testing.T) {
 	assert.Contains(t, body, "vaultfleet_last_successful_backup_timestamp_seconds 1779286516")
 }
 
+func TestMetricsOutputsZeroCommandAndTaskSeriesOnEmptyDatabase(t *testing.T) {
+	database := newHealthTestDatabase(t)
+	router := newHealthTestRouter(database, fakeHealthAgentStatusProvider{online: 0})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := w.Body.String()
+	assert.Contains(t, body, "vaultfleet_agents_total 0")
+	assert.Contains(t, body, "vaultfleet_agents_online 0")
+	assert.Contains(t, body, "vaultfleet_agent_commands_total 0")
+	assert.Contains(t, body, "vaultfleet_tasks_total 0")
+	assert.Contains(t, body, "vaultfleet_last_successful_backup_timestamp_seconds 0")
+}
+
 func TestMetricsReturnsText500WhenDatabaseQueryFails(t *testing.T) {
 	database := newHealthTestDatabase(t)
 	sqlDB, err := database.DB.DB()

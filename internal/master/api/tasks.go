@@ -30,22 +30,24 @@ type CommandHub interface {
 }
 
 type taskResponse struct {
-	ID         string     `json:"id"`
-	AgentID    string     `json:"agent_id"`
-	Type       string     `json:"type"`
-	Status     string     `json:"status"`
-	SnapshotID string     `json:"snapshot_id"`
-	MessageID  string     `json:"message_id,omitempty"`
-	CommandID  string     `json:"command_id,omitempty"`
-	PolicyID   string     `json:"policy_id,omitempty"`
-	StorageID  string     `json:"storage_id,omitempty"`
-	StartedAt  *time.Time `json:"started_at"`
-	FinishedAt *time.Time `json:"finished_at"`
-	DurationMs int64      `json:"duration_ms"`
-	RepoSize   int64      `json:"repo_size"`
-	ErrorLog   string     `json:"error_log,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	ID            string     `json:"id"`
+	AgentID       string     `json:"agent_id"`
+	Type          string     `json:"type"`
+	Status        string     `json:"status"`
+	SnapshotID    string     `json:"snapshot_id"`
+	MessageID     string     `json:"message_id,omitempty"`
+	CommandID     string     `json:"command_id,omitempty"`
+	PolicyID      string     `json:"policy_id,omitempty"`
+	StorageID     string     `json:"storage_id,omitempty"`
+	StartedAt     *time.Time `json:"started_at"`
+	FinishedAt    *time.Time `json:"finished_at"`
+	DurationMs    int64      `json:"duration_ms"`
+	RepoSize      int64      `json:"repo_size"`
+	RepoSizeBytes int64      `json:"repository_size_bytes"`
+	ErrorLog      string     `json:"error_log,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 func NewTaskHandler(database *db.Database, hub CommandHub) *TaskHandler {
@@ -154,21 +156,23 @@ func parseTaskLimit(raw string) int {
 
 func newTaskResponse(history db.TaskHistory) taskResponse {
 	return taskResponse{
-		ID:         history.ID,
-		AgentID:    history.AgentID,
-		Type:       history.Type,
-		Status:     history.Status,
-		SnapshotID: history.SnapshotID,
-		MessageID:  history.MessageID,
-		CommandID:  history.CommandID,
-		PolicyID:   history.PolicyID,
-		StorageID:  history.StorageID,
-		StartedAt:  history.StartedAt,
-		FinishedAt: history.FinishedAt,
-		DurationMs: history.DurationMs,
-		RepoSize:   history.RepoSize,
-		ErrorLog:   history.ErrorLog,
-		CreatedAt:  history.CreatedAt,
-		UpdatedAt:  history.UpdatedAt,
+		ID:            history.ID,
+		AgentID:       history.AgentID,
+		Type:          history.Type,
+		Status:        history.Status,
+		SnapshotID:    history.SnapshotID,
+		MessageID:     history.MessageID,
+		CommandID:     history.CommandID,
+		PolicyID:      history.PolicyID,
+		StorageID:     history.StorageID,
+		StartedAt:     history.StartedAt,
+		FinishedAt:    history.FinishedAt,
+		DurationMs:    history.DurationMs,
+		RepoSize:      history.RepoSize,
+		RepoSizeBytes: history.RepoSize,
+		ErrorLog:      history.ErrorLog,
+		Error:         history.ErrorLog,
+		CreatedAt:     history.CreatedAt,
+		UpdatedAt:     history.UpdatedAt,
 	}
 }

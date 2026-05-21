@@ -49,7 +49,10 @@ type snapshotResponse struct {
 	ID         string    `json:"id"`
 	SnapshotID string    `json:"snapshot_id"`
 	Timestamp  time.Time `json:"timestamp"`
+	Time       time.Time `json:"time"`
 	Paths      []string  `json:"paths"`
+	Hostname   string    `json:"hostname"`
+	Username   string    `json:"username"`
 	Size       int64     `json:"size"`
 }
 
@@ -244,10 +247,13 @@ func newSnapshotResponse(snapshot db.Snapshot) (snapshotResponse, error) {
 		}
 	}
 	return snapshotResponse{
-		ID:         snapshot.ID,
+		ID:         snapshot.SnapshotID,
 		SnapshotID: snapshot.SnapshotID,
 		Timestamp:  snapshot.Timestamp,
+		Time:       snapshot.Timestamp,
 		Paths:      paths,
+		Hostname:   "",
+		Username:   "",
 		Size:       snapshot.Size,
 	}, nil
 }

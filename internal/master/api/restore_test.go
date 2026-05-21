@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -129,6 +130,39 @@ func TestRestoreSendsMessageAndRecordsRunningTask(t *testing.T) {
 	assert.Equal(t, command.ID, history.CommandID)
 	assert.Nil(t, history.StartedAt)
 	assert.Nil(t, history.FinishedAt)
+}
+
+func TestRestoreResolvesDatabaseSnapshotIDToResticSnapshotID(t *testing.T) {
+	setup := setupRestoreAPI(t)
+	agent := createRestoreTestAgent(t, setup.database, "online")
+	setup.hub.online[agent.ID] = true
+	snapshotTime := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	pathsJSON := `["/etc"]`
+	snapshot := db.Snapshot{
+		AgentID:    agent.ID,
+		SnapshotID: "restic-snap-1",
+		Timestamp:  snapshotTime,
+		Paths:      pathsJSON,
+		Size:       512,
+	}
+	require.NoError(t, setup.database.DB.Create(&snapshot).Error)
+
+	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/restore", map[string]any{
+		"snapshot_id": snapshot.ID,
+		"target_path": "/restore/target",
+	})
+
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	require.Len(t, setup.hub.sent, 1)
+	payload, err := protocol.ParsePayload[protocol.RestoreReqPayload](&setup.hub.sent[0].message)
+	require.NoError(t, err)
+	assert.Equal(t, "restic-snap-1", payload.SnapshotID)
+
+	body := parseJSON(t, w)
+	data := requireMap(t, body["data"])
+	var history db.TaskHistory
+	require.NoError(t, setup.database.DB.First(&history, "command_id = ?", data["command_id"]).Error)
+	assert.Equal(t, "restic-snap-1", history.SnapshotID)
 }
 
 func TestRestoreAcceptsAcceptanceTargetAlias(t *testing.T) {

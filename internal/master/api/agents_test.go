@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -248,6 +249,32 @@ func TestListAgents(t *testing.T) {
 	}
 	assert.True(t, seen[first["id"].(string)])
 	assert.True(t, seen[second["id"].(string)])
+}
+
+func TestListAgentsExposesAcceptanceFieldAliases(t *testing.T) {
+	setup := setupTestAgents(t)
+	lastSeen := time.Date(2026, 5, 21, 5, 20, 52, 0, time.UTC)
+	agent := db.Agent{
+		Name:       "Debian-AMD64",
+		Status:     "online",
+		LastSeenAt: &lastSeen,
+		SystemInfo: `{"hostname":"ser4885257919","os":"linux","arch":"amd64","version":"0.1.0"}`,
+	}
+	require.NoError(t, setup.database.DB.Create(&agent).Error)
+
+	w := getJSON(t, setup.router, "/api/agents")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireList(t, body["data"])
+	require.Len(t, data, 1)
+	item := requireMap(t, data[0])
+	assert.Equal(t, lastSeen.Format(time.RFC3339Nano), item["last_seen"])
+	assert.Equal(t, item["last_seen_at"], item["last_seen"])
+	assert.Equal(t, "ser4885257919", item["hostname"])
+	assert.Equal(t, "linux", item["os"])
+	assert.Equal(t, "amd64", item["arch"])
+	assert.Equal(t, "0.1.0", item["version"])
 }
 
 func TestListAgents_Empty(t *testing.T) {

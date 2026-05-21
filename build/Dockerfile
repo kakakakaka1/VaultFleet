@@ -26,12 +26,22 @@ RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /bin/vaultfleet-master
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata rclone iproute2 && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /bin/vaultfleet-master /usr/local/bin/vaultfleet-master
+RUN printf '%s\n' \
+  '#!/bin/sh' \
+  'set -e' \
+  'if ! getent hosts host.docker.internal >/dev/null 2>&1; then' \
+  '  gateway="$(ip route | awk '\''/default/ {print $3; exit}'\'')" || true' \
+  '  if [ -n "$gateway" ]; then echo "$gateway host.docker.internal host-gateway" >> /etc/hosts; fi' \
+  'fi' \
+  'if [ "${1#-}" != "$1" ]; then set -- vaultfleet-master "$@"; fi' \
+  'exec "$@"' \
+  > /usr/local/bin/vaultfleet-entrypoint && chmod +x /usr/local/bin/vaultfleet-entrypoint
 
 VOLUME ["/data"]
 EXPOSE 8080
 
-ENTRYPOINT ["vaultfleet-master"]
+ENTRYPOINT ["vaultfleet-entrypoint"]
 CMD ["--data-dir", "/data", "--addr", ":8080"]

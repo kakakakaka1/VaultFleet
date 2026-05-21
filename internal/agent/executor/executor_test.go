@@ -60,6 +60,7 @@ func TestRunBackupJobSuccessReturnsLatestSnapshotAndSnapshots(t *testing.T) {
 	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
 	runner := &recordingRunner{
 		backupDelay: 10 * time.Millisecond,
+		repoSize:    4096,
 		snapshots: []SnapshotInfo{
 			{ID: "old", Time: now.Add(-time.Hour)},
 			{ID: "new", Time: now},
@@ -83,13 +84,38 @@ func TestRunBackupJobSuccessReturnsLatestSnapshotAndSnapshots(t *testing.T) {
 	if result.SnapshotID != "new" {
 		t.Fatalf("SnapshotID = %q, want new", result.SnapshotID)
 	}
+	if result.RepoSize != 4096 {
+		t.Fatalf("RepoSize = %d, want 4096", result.RepoSize)
+	}
 	if len(result.Snapshots) != 2 {
 		t.Fatalf("Snapshots length = %d, want 2", len(result.Snapshots))
 	}
 	if result.DurationMs <= 0 {
 		t.Fatalf("DurationMs = %d, want positive duration", result.DurationMs)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots", "stats"})
+}
+
+func TestRunBackupJobFailsWhenRepositorySizeCannotBeRead(t *testing.T) {
+	runner := &recordingRunner{
+		snapshots: []SnapshotInfo{{ID: "snap-1", Time: time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)}},
+		statsErr:  errors.New("repository locked"),
+	}
+	executor := &Executor{
+		restic:     runner,
+		backupDirs: []string{"/data"},
+		retention:  RetentionPolicy{KeepLast: 1},
+	}
+
+	result := executor.RunBackupJob(context.Background())
+
+	if result.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(result.ErrorLog, "stats: repository locked") {
+		t.Fatalf("ErrorLog = %q, want stats stage and error", result.ErrorLog)
+	}
+	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots", "stats"})
 }
 
 func TestRunBackupJobFailureStopsAtStageAndReturnsErrorLog(t *testing.T) {
@@ -255,6 +281,8 @@ type recordingRunner struct {
 	forgetErr   error
 	snapshots   []SnapshotInfo
 	snapshotErr error
+	repoSize    int64
+	statsErr    error
 	restoreErr  error
 }
 
@@ -279,6 +307,11 @@ func (r *recordingRunner) RunForget(_ context.Context, retention RetentionPolicy
 func (r *recordingRunner) ListSnapshots(context.Context) ([]SnapshotInfo, error) {
 	r.calls = append(r.calls, "snapshots")
 	return r.snapshots, r.snapshotErr
+}
+
+func (r *recordingRunner) RepositorySize(context.Context) (int64, error) {
+	r.calls = append(r.calls, "stats")
+	return r.repoSize, r.statsErr
 }
 
 func (r *recordingRunner) RestoreSnapshot(context.Context, string, string) error {

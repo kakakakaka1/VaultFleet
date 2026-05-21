@@ -33,6 +33,23 @@ func TestGetCommandRedactsPayload(t *testing.T) {
 	assert.NotContains(t, data, "payload")
 }
 
+func TestGetCommandExposesErrorAlias(t *testing.T) {
+	setup := setupCommandsAPI(t)
+	agent := createCommandsTestAgent(t, setup.database, "online")
+	command := createAPICommand(t, setup.service, agent.ID, protocol.TypeRestoreReq, commands.CommandStatusFailed)
+	require.NoError(t, setup.database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Update("error_message", "restore restic snapshot failed").Error)
+
+	w := getJSON(t, setup.router, "/api/commands/"+command.ID)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireMap(t, body["data"])
+	assert.Equal(t, "restore restic snapshot failed", data["error_message"])
+	assert.Equal(t, "restore restic snapshot failed", data["error"])
+}
+
 func TestGetCommandReturnsNotFoundForMissingCommand(t *testing.T) {
 	setup := setupCommandsAPI(t)
 

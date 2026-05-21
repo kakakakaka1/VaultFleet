@@ -114,6 +114,31 @@ func TestListTasksFiltersAndLimitsHistory(t *testing.T) {
 	assert.NotEmpty(t, task["updated_at"])
 }
 
+func TestListTasksExposesRepositorySizeAndErrorAliases(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	finishedAt := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	history := seedTaskHistory(t, setup.database, agent.ID, "backup", "failed", "snap-failed", finishedAt)
+	require.NoError(t, setup.database.DB.Model(&db.TaskHistory{}).
+		Where("id = ?", history.ID).
+		Updates(map[string]any{
+			"repo_size": 4096,
+			"error_log": "restic failed",
+		}).Error)
+
+	w := getJSON(t, setup.router, "/api/tasks?agent_id="+agent.ID+"&limit=1")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireList(t, body["data"])
+	require.Len(t, data, 1)
+	task := requireMap(t, data[0])
+	assert.Equal(t, float64(4096), task["repo_size"])
+	assert.Equal(t, float64(4096), task["repository_size_bytes"])
+	assert.Equal(t, "restic failed", task["error_log"])
+	assert.Equal(t, "restic failed", task["error"])
+}
+
 type tasksAPISetup struct {
 	database *db.Database
 	hub      *fakeCommandHub

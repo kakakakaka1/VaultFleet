@@ -448,11 +448,35 @@ func TestListSnapshots(t *testing.T) {
 	var body []snapshotAPITestResponse
 	require.NoError(t, json.Unmarshal(data, &body))
 	require.Len(t, body, 2)
+	assert.Equal(t, "snap-new", body[0].ID)
 	assert.Equal(t, "snap-new", body[0].SnapshotID)
-	assert.True(t, body[0].Timestamp.Equal(newer))
+	assert.True(t, body[0].Time.Equal(newer))
 	assert.Equal(t, []string{"/home", "/srv"}, body[0].Paths)
 	assert.Equal(t, int64(200), body[0].Size)
-	assert.Equal(t, "snap-old", body[1].SnapshotID)
+	assert.Equal(t, "snap-old", body[1].ID)
+}
+
+func TestListSnapshotsExposesSpecFields(t *testing.T) {
+	setup := setupSnapshotAPI(t)
+	agent := createSnapshotTestAgent(t, setup.database, "online")
+	snapshotTime := time.Date(2026, 5, 18, 12, 34, 56, 0, time.UTC)
+	stored := createSnapshotRecord(t, setup.database, agent.ID, "restic-snap-1", snapshotTime, []string{"/etc"}, 512)
+
+	w := getJSON(t, setup.router, "/api/agents/"+agent.ID+"/snapshots")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireList(t, body["data"])
+	require.Len(t, data, 1)
+	item := requireMap(t, data[0])
+	assert.Equal(t, "restic-snap-1", item["id"])
+	assert.NotEqual(t, stored.ID, item["id"])
+	assert.Equal(t, snapshotTime.Format(time.RFC3339), item["time"])
+	assertJSONList(t, item["paths"], []string{"/etc"})
+	assert.Contains(t, item, "hostname")
+	assert.Contains(t, item, "username")
+	assert.Contains(t, item, "snapshot_id")
+	assert.Contains(t, item, "timestamp")
 }
 
 func TestListSnapshotsMissingAgent(t *testing.T) {
@@ -1098,7 +1122,10 @@ type snapshotAPITestResponse struct {
 	ID         string    `json:"id"`
 	SnapshotID string    `json:"snapshot_id"`
 	Timestamp  time.Time `json:"timestamp"`
+	Time       time.Time `json:"time"`
 	Paths      []string  `json:"paths"`
+	Hostname   string    `json:"hostname"`
+	Username   string    `json:"username"`
 	Size       int64     `json:"size"`
 }
 

@@ -30,12 +30,14 @@ func NewNotificationHandler(database *db.Database) *NotificationHandler {
 }
 
 type notificationRequest struct {
+	Name   string         `json:"name"`
 	Type   string         `json:"type"`
 	Config map[string]any `json:"config"`
 	Events []string       `json:"events"`
 }
 
 type updateNotificationRequest struct {
+	Name   *string        `json:"name"`
 	Type   *string        `json:"type"`
 	Config map[string]any `json:"config"`
 	Events []string       `json:"events"`
@@ -43,6 +45,7 @@ type updateNotificationRequest struct {
 
 type notificationResponse struct {
 	ID        string         `json:"id"`
+	Name      string         `json:"name"`
 	Type      string         `json:"type"`
 	Config    map[string]any `json:"config"`
 	Events    []string       `json:"events"`
@@ -75,6 +78,7 @@ func (h *NotificationHandler) Create(c *gin.Context) {
 	}
 
 	config := db.NotificationConfig{
+		Name:   notificationName(request.Name, request.Type),
 		Type:   request.Type,
 		Config: encryptedConfig,
 		Events: eventsJSON,
@@ -84,7 +88,7 @@ func (h *NotificationHandler) Create(c *gin.Context) {
 		return
 	}
 
-	h.writeNotificationResponse(c, http.StatusCreated, config)
+	h.writeNotificationDataResponse(c, http.StatusCreated, config)
 }
 
 func (h *NotificationHandler) List(c *gin.Context) {
@@ -104,7 +108,7 @@ func (h *NotificationHandler) List(c *gin.Context) {
 		responses = append(responses, response)
 	}
 
-	c.JSON(http.StatusOK, responses)
+	writeDataResponse(c, http.StatusOK, responses)
 }
 
 func (h *NotificationHandler) Get(c *gin.Context) {
@@ -176,6 +180,9 @@ func (h *NotificationHandler) Update(c *gin.Context) {
 	}
 
 	config.Type = nextType
+	if request.Name != nil {
+		config.Name = notificationName(*request.Name, nextType)
+	}
 	config.Config = encryptedConfig
 	config.Events = nextEvents
 	if err := h.DB.DB.Save(&config).Error; err != nil {
@@ -283,6 +290,16 @@ func (h *NotificationHandler) writeNotificationResponse(c *gin.Context, status i
 	c.JSON(status, response)
 }
 
+func (h *NotificationHandler) writeNotificationDataResponse(c *gin.Context, status int, config db.NotificationConfig) {
+	response, err := h.newNotificationResponse(config)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "decode notification config"})
+		return
+	}
+
+	writeDataResponse(c, status, response)
+}
+
 func (h *NotificationHandler) newNotificationResponse(config db.NotificationConfig) (notificationResponse, error) {
 	configJSON, err := h.decryptNotificationConfig(config.Config)
 	if err != nil {
@@ -309,11 +326,27 @@ func (h *NotificationHandler) newNotificationResponse(config db.NotificationConf
 
 	return notificationResponse{
 		ID:        config.ID,
+		Name:      notificationName(config.Name, config.Type),
 		Type:      config.Type,
 		Config:    rawConfig,
 		Events:    eventNames,
 		CreatedAt: config.CreatedAt,
 	}, nil
+}
+
+func notificationName(name string, notificationType string) string {
+	name = strings.TrimSpace(name)
+	if name != "" {
+		return name
+	}
+	switch notificationType {
+	case "telegram":
+		return "Telegram"
+	case "webhook":
+		return "Webhook"
+	default:
+		return notificationType
+	}
 }
 
 func marshalNotificationConfig(c *gin.Context, value map[string]any) (string, bool) {

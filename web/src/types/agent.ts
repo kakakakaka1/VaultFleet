@@ -10,6 +10,20 @@ export interface Agent {
   created_at: string;
 }
 
+export interface ApiAgent {
+  id: string;
+  name: string;
+  status: "online" | "offline";
+  last_seen?: string | null;
+  last_seen_at?: string | null;
+  version?: string | null;
+  hostname?: string | null;
+  os?: string | null;
+  arch?: string | null;
+  system_info?: string | null;
+  created_at: string;
+}
+
 export interface CreateAgentResponse {
   id: string;
   enroll_token: string;

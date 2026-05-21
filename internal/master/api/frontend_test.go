@@ -24,7 +24,7 @@ func TestFrontendRootServesSPA(t *testing.T) {
 func TestFrontendAcceptancePaths(t *testing.T) {
 	router := newFrontendPlaceholderTestRouter()
 
-	for _, path := range []string{"/", "/dashboard", "/nodes", "/nodes/agent-1", "/settings"} {
+	for _, path := range []string{"/", "/dashboard", "/nodes", "/nodes/agent-1", "/system"} {
 		t.Run(path, func(t *testing.T) {
 			w := getFrontendPlaceholder(t, router, path)
 
@@ -45,6 +45,28 @@ func TestFrontendDoesNotServeBackendRoutes(t *testing.T) {
 			assert.NotContains(t, w.Header().Get("Content-Type"), "text/html")
 		})
 	}
+}
+
+func TestFrontendDoesNotServeNormalizedTraversalTargets(t *testing.T) {
+	router := newFrontendPlaceholderTestRouter()
+
+	for _, path := range []string{"/master.key", "/etc/passwd"} {
+		t.Run(path, func(t *testing.T) {
+			w := getFrontendPlaceholder(t, router, path)
+
+			require.Equal(t, http.StatusNotFound, w.Code)
+			assert.NotContains(t, w.Header().Get("Content-Type"), "text/html")
+			assert.NotContains(t, w.Body.String(), "VaultFleet")
+		})
+	}
+}
+
+func TestFrontendFaviconDoesNotProduceBrowserError(t *testing.T) {
+	router := newFrontendPlaceholderTestRouter()
+
+	w := getFrontendPlaceholder(t, router, "/favicon.ico")
+
+	require.Equal(t, http.StatusNoContent, w.Code)
 }
 
 func newFrontendPlaceholderTestRouter() *gin.Engine {

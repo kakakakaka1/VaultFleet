@@ -1,11 +1,51 @@
-import { Agent, CreateAgentResponse } from "@/types/agent";
+import { Agent, ApiAgent, CreateAgentResponse } from "@/types/agent";
 import { BrowseRequest, BrowseResponse } from "@/types/api";
 import { apiDelete, apiGet, apiPost } from "./http";
 
-export const listAgents = () => apiGet<Agent[]>("/api/agents");
+export const listAgents = async () => (await apiGet<ApiAgent[]>("/api/agents")).map(normalizeAgent);
 export const createAgent = (body: { name: string }) => apiPost<CreateAgentResponse>("/api/agents", body);
-export const getAgent = (id: string) => apiGet<Agent>(`/api/agents/${id}`);
+export const getAgent = async (id: string) => normalizeAgent(await apiGet<ApiAgent>(`/api/agents/${id}`));
 export const deleteAgent = (id: string) => apiDelete(`/api/agents/${id}`);
 export const regenerateAgentToken = (id: string) => apiPost<CreateAgentResponse>(`/api/agents/${id}/regenerate-token`);
 export const browseAgent = (id: string, body: BrowseRequest) => apiPost<BrowseResponse>(`/api/agents/${id}/browse`, body);
 export const backupNow = (id: string) => apiPost<{ command_id: string; message_id: string }>(`/api/agents/${id}/backup-now`);
+
+export function normalizeAgent(agent: ApiAgent): Agent {
+  const systemInfo = parseSystemInfo(agent.system_info);
+  return {
+    id: agent.id,
+    name: agent.name,
+    status: agent.status,
+    last_seen: agent.last_seen ?? agent.last_seen_at ?? "",
+    version: agent.version ?? systemInfo.version ?? "",
+    hostname: agent.hostname ?? systemInfo.hostname ?? "",
+    os: agent.os ?? systemInfo.os ?? "",
+    arch: agent.arch ?? systemInfo.arch ?? "",
+    created_at: agent.created_at,
+  };
+}
+
+function parseSystemInfo(raw: string | null | undefined): Partial<Pick<Agent, "version" | "hostname" | "os" | "arch">> {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+    return {
+      version: stringField(parsed, "version"),
+      hostname: stringField(parsed, "hostname"),
+      os: stringField(parsed, "os"),
+      arch: stringField(parsed, "arch"),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function stringField(value: object, key: string): string | undefined {
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "string" ? field : undefined;
+}

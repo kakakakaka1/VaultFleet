@@ -16,8 +16,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTr
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { InstallCommand } from "@/components/install-command";
 import { Link } from "react-router-dom";
-import { format } from "date-fns";
-import { zhCN } from "date-fns/locale";
+import { safeFormatDate } from "@/lib/date";
 
 export function NodesPage() {
   const queryClient = useQueryClient();
@@ -28,7 +27,11 @@ export function NodesPage() {
   const [confirmDeleteId, setConfirmConfirmDeleteId] = useState<string | null>(null);
   const [confirmRegenId, setConfirmRegenId] = useState<string | null>(null);
 
-  const { data: agents, isLoading } = useQuery({ queryKey: ["agents"], queryFn: listAgents });
+  const { data: agents, isLoading } = useQuery({
+    queryKey: ["agents"],
+    queryFn: listAgents,
+    refetchInterval: 10000,
+  });
 
   const createMutation = useMutation({
     mutationFn: createAgent,
@@ -159,7 +162,7 @@ export function NodesPage() {
                     <StatusBadge status={agent.status} />
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    {agent.last_seen ? format(new Date(agent.last_seen), "yyyy-MM-dd HH:mm:ss", { locale: zhCN }) : "从未在线"}
+                    {safeFormatDate(agent.last_seen, "yyyy-MM-dd HH:mm:ss", "从未在线")}
                   </TableCell>
                   <TableCell className="hidden md:table-cell text-xs">
                     <div className="flex flex-col">
@@ -168,7 +171,7 @@ export function NodesPage() {
                     </div>
                   </TableCell>
                   <TableCell className="hidden lg:table-cell text-xs text-muted-foreground">
-                    {format(new Date(agent.created_at), "yyyy-MM-dd", { locale: zhCN })}
+                    {safeFormatDate(agent.created_at, "yyyy-MM-dd")}
                   </TableCell>
                   <TableCell className="text-right">
                     <DropdownMenu>

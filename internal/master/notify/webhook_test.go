@@ -3,9 +3,11 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,6 +114,29 @@ func TestWebhookNotifierSendReturnsContextError(t *testing.T) {
 	assert.NotContains(t, err.Error(), "hooks.example.test")
 }
 
+func TestWebhookNotifierFallsBackToDockerHostForLocalhost(t *testing.T) {
+	receivedHosts := make([]string, 0, 2)
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		receivedHosts = append(receivedHosts, req.URL.Host)
+		if strings.HasPrefix(req.URL.Host, "localhost:") {
+			return nil, errors.New("connection refused")
+		}
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	wh := NewWebhookNotifier(WebhookConfig{URL: "http://localhost:9999/notify"})
+	wh.client = &http.Client{Transport: transport}
+
+	err := wh.Send(context.Background(), NotifyMessage{Title: "Test", Timestamp: time.Now()})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"localhost:9999", "host.docker.internal:9999"}, receivedHosts)
+}
+
 func TestWebhookNotifierSendErrorDoesNotLeakSecretURL(t *testing.T) {
 	wh := NewWebhookNotifier(WebhookConfig{URL: "http://127.0.0.1:1/secret-path?token=abc123"})
 
@@ -122,6 +147,12 @@ func TestWebhookNotifierSendErrorDoesNotLeakSecretURL(t *testing.T) {
 	assert.NotContains(t, err.Error(), "secret-path")
 	assert.NotContains(t, err.Error(), "token=abc123")
 	assert.NotContains(t, err.Error(), "127.0.0.1:1")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestWebhookNotifierType(t *testing.T) {

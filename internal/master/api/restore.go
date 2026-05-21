@@ -1,9 +1,11 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
@@ -54,9 +56,13 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 		writeErrorResponse(c, http.StatusBadRequest, "invalid request")
 		return
 	}
+	snapshotID, ok := h.resolveSnapshotID(c, agentID, request.SnapshotID)
+	if !ok {
+		return
+	}
 
 	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
-		SnapshotID: request.SnapshotID,
+		SnapshotID: snapshotID,
 		Target:     targetPath,
 	})
 	if err != nil {
@@ -71,7 +77,7 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 		Message:    *msg,
 		TaskType:   "restore",
 		TaskState:  commands.TaskStatusPending,
-		SnapshotID: request.SnapshotID,
+		SnapshotID: snapshotID,
 	})
 	if err != nil {
 		writeErrorResponse(c, http.StatusInternalServerError, "database error")
@@ -99,6 +105,21 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 		"command_id": command.ID,
 		"message_id": msg.ID,
 	})
+}
+
+func (h *RestoreHandler) resolveSnapshotID(c *gin.Context, agentID string, requestedID string) (string, bool) {
+	var snapshot db.Snapshot
+	err := h.DB.DB.WithContext(contextFromGin(c)).
+		Where("agent_id = ? AND (id = ? OR snapshot_id = ?)", agentID, requestedID, requestedID).
+		First(&snapshot).Error
+	if err == nil {
+		return snapshot.SnapshotID, true
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return requestedID, true
+	}
+	writeErrorResponse(c, http.StatusInternalServerError, "database error")
+	return "", false
 }
 
 func (h *RestoreHandler) commandService() *commands.Service {

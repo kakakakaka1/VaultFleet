@@ -56,6 +56,7 @@ type resticExecutor interface {
 	RunBackup(ctx context.Context, dirs []string, excludes []string) (string, error)
 	RunForget(ctx context.Context, retention RetentionPolicy) error
 	ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
+	RepositorySize(ctx context.Context) (int64, error)
 	RestoreSnapshot(ctx context.Context, snapshotID, targetPath string) error
 }
 
@@ -108,9 +109,16 @@ func (e *Executor) RunBackupJob(ctx context.Context) (result TaskResult) {
 		return result
 	}
 
+	repoSize, err := e.restic.RepositorySize(ctx)
+	if err != nil {
+		result.ErrorLog = "stats: " + err.Error()
+		return result
+	}
+
 	result.Status = "success"
 	result.ErrorLog = ""
 	result.Snapshots = append([]SnapshotInfo(nil), snapshots...)
+	result.RepoSize = repoSize
 	if len(snapshots) > 0 {
 		latest := snapshots[0]
 		for _, snapshot := range snapshots[1:] {

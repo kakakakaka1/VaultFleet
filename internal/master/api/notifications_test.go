@@ -43,6 +43,7 @@ func TestCreateNotificationConfig(t *testing.T) {
 	setup := setupNotificationAPI(t)
 
 	w := postAnyJSON(t, setup.router, "/api/notifications", map[string]any{
+		"name": "Ops Webhook",
 		"type": "webhook",
 		"config": map[string]any{
 			"url": "https://hooks.example.test/notify",
@@ -55,8 +56,11 @@ func TestCreateNotificationConfig(t *testing.T) {
 	})
 
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
-	body := parseJSON(t, w)
+	envelope := parseJSON(t, w)
+	assert.Equal(t, true, envelope["ok"])
+	body := requireMap(t, envelope["data"])
 	assert.NotEmpty(t, body["id"])
+	assert.Equal(t, "Ops Webhook", body["name"])
 	assert.Equal(t, "webhook", body["type"])
 	assertJSONList(t, body["events"], []string{"backup_failed", "agent_offline"})
 	config := requireMap(t, body["config"])
@@ -67,6 +71,7 @@ func TestCreateNotificationConfig(t *testing.T) {
 
 	var stored db.NotificationConfig
 	require.NoError(t, setup.database.DB.First(&stored, "id = ?", body["id"]).Error)
+	assert.Equal(t, "Ops Webhook", notificationStoredName(t, setup.database, stored.ID))
 	assert.JSONEq(t, `["backup_failed","agent_offline"]`, stored.Events)
 	assert.NotContains(t, stored.Config, "Bearer secret")
 	assert.NotContains(t, stored.Config, "hooks.example.test")
@@ -90,7 +95,9 @@ func TestTelegramNotificationConfigEncryptsAndRedactsBotToken(t *testing.T) {
 	})
 
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
-	body := parseJSON(t, w)
+	envelope := parseJSON(t, w)
+	assert.Equal(t, true, envelope["ok"])
+	body := requireMap(t, envelope["data"])
 	config := requireMap(t, body["config"])
 	assert.Equal(t, redactedSecretValue, config["bot_token"])
 	assert.Equal(t, "chat-1", config["chat_id"])
@@ -209,13 +216,20 @@ func TestListAndGetNotificationConfigsReturnEventArrays(t *testing.T) {
 
 	w := getJSON(t, setup.router, "/api/notifications")
 	require.Equal(t, http.StatusOK, w.Code)
-	var list []map[string]any
-	parseJSONInto(t, w, &list)
+	envelope := parseJSON(t, w)
+	assert.Equal(t, true, envelope["ok"])
+	listData := requireList(t, envelope["data"])
+	list := make([]map[string]any, 0, len(listData))
+	for _, item := range listData {
+		list = append(list, requireMap(t, item))
+	}
 	require.Len(t, list, 2)
 	seen := map[string]map[string]any{}
 	for _, item := range list {
 		seen[item["id"].(string)] = item
 	}
+	assert.NotEmpty(t, seen[first["id"].(string)]["name"])
+	assert.NotEmpty(t, seen[second["id"].(string)]["name"])
 	assertJSONList(t, seen[first["id"].(string)]["events"], []string{"backup_failed"})
 	assertJSONList(t, seen[second["id"].(string)]["events"], []string{"agent_offline"})
 	firstListConfig := requireMap(t, seen[first["id"].(string)]["config"])
@@ -255,6 +269,7 @@ func TestUpdateNotificationConfig(t *testing.T) {
 	id := created["id"].(string)
 
 	w := putJSON(t, setup.router, "/api/notifications/"+id, map[string]any{
+		"name": "Telegram Ops",
 		"type": "telegram",
 		"config": map[string]any{
 			"bot_token": "new-token",
@@ -266,6 +281,7 @@ func TestUpdateNotificationConfig(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	body := parseJSON(t, w)
 	assert.Equal(t, id, body["id"])
+	assert.Equal(t, "Telegram Ops", body["name"])
 	assert.Equal(t, "telegram", body["type"])
 	assertJSONList(t, body["events"], []string{"agent_offline"})
 	config := requireMap(t, body["config"])
@@ -274,6 +290,7 @@ func TestUpdateNotificationConfig(t *testing.T) {
 
 	var stored db.NotificationConfig
 	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
+	assert.Equal(t, "Telegram Ops", notificationStoredName(t, setup.database, stored.ID))
 	assert.Equal(t, "telegram", stored.Type)
 	plaintext, err := db.Decrypt(stored.Config, setup.database.MasterKey)
 	require.NoError(t, err)
@@ -468,7 +485,17 @@ func createNotificationConfigViaAPI(t *testing.T, router http.Handler, notificat
 		"events": events,
 	})
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
-	return parseJSON(t, w)
+	envelope := parseJSON(t, w)
+	assert.Equal(t, true, envelope["ok"])
+	return requireMap(t, envelope["data"])
+}
+
+func notificationStoredName(t *testing.T, database *db.Database, id string) string {
+	t.Helper()
+
+	var name string
+	require.NoError(t, database.DB.Raw("SELECT name FROM notification_configs WHERE id = ?", id).Scan(&name).Error)
+	return name
 }
 
 type apiRecordingNotifier struct {

@@ -118,6 +118,28 @@ func TestBuildSnapshotsCmdRequestsJSON(t *testing.T) {
 	})
 }
 
+func TestBuildStatsCmdRequestsRawRepositorySizeAsJSON(t *testing.T) {
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   "/tmp/.restic-password",
+		RepoPath:       "repo",
+	}
+
+	cmd := runner.buildStatsCmd()
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"stats",
+		"--mode",
+		"raw-data",
+		"--json",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		"/tmp/.restic-password",
+	})
+}
+
 func TestBuildRestoreCmdIncludesSnapshotAndTarget(t *testing.T) {
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
@@ -175,6 +197,26 @@ func TestInitRepoIgnoresAlreadyInitializedError(t *testing.T) {
 				t.Fatalf("InitRepo() error = %v, want nil", err)
 			}
 		})
+	}
+}
+
+func TestInitRepoSkipsInitWhenSnapshotsCanListExistingRepository(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"cat":       {Stderr: "repository does not exist\n", Exit: 10},
+		"snapshots": {Stdout: `[]` + "\n"},
+		"init":      {Stderr: "init should not be called\n", Exit: 1},
+	})
+	prependPath(t, dir)
+
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   "/tmp/.restic-password",
+		RepoPath:       "repo",
+	}
+
+	if err := runner.InitRepo(context.Background()); err != nil {
+		t.Fatalf("InitRepo() error = %v, want nil", err)
 	}
 }
 
@@ -246,6 +288,48 @@ func TestListSnapshotsParsesResticJSON(t *testing.T) {
 	}
 	if len(got[0].Paths) != 1 || got[0].Paths[0] != "/data" {
 		t.Fatalf("ListSnapshots()[0].Paths = %#v", got[0].Paths)
+	}
+}
+
+func TestRepositorySizeParsesResticStatsJSON(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeRestic(t, dir, fakeResticScript{
+		Stdout: `{"total_size":987654,"total_file_count":12}` + "\n",
+	})
+	prependPath(t, dir)
+
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   "/tmp/.restic-password",
+		RepoPath:       "repo",
+	}
+
+	got, err := runner.RepositorySize(context.Background())
+	if err != nil {
+		t.Fatalf("RepositorySize() error = %v", err)
+	}
+	if got != 987654 {
+		t.Fatalf("RepositorySize() = %d, want 987654", got)
+	}
+}
+
+func TestRepositorySizeReturnsStderrOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeRestic(t, dir, fakeResticScript{Stderr: "stats failed\n", Exit: 1})
+	prependPath(t, dir)
+
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   "/tmp/.restic-password",
+		RepoPath:       "repo",
+	}
+
+	_, err := runner.RepositorySize(context.Background())
+	if err == nil {
+		t.Fatal("RepositorySize() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "stats failed") {
+		t.Fatalf("RepositorySize() error = %q, want stderr included", err.Error())
 	}
 }
 
@@ -342,6 +426,43 @@ func writeFakeRestic(t *testing.T, dir string, script fakeResticScript) {
 
 	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
 		t.Fatalf("write fake restic: %v", err)
+	}
+}
+
+func writeFakeResticRouter(t *testing.T, dir string, scripts map[string]fakeResticScript) {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("fake restic shell script is not supported on windows")
+	}
+
+	path := filepath.Join(dir, "restic")
+	content := "#!/bin/sh\n"
+	content += "case \"$1\" in\n"
+	keys := make([]string, 0, len(scripts))
+	for key := range scripts {
+		keys = append(keys, key)
+	}
+	for _, key := range keys {
+		script := scripts[key]
+		content += key + ")\n"
+		if script.SleepSeconds > 0 {
+			content += "sleep " + strconv.Itoa(script.SleepSeconds) + "\n"
+		}
+		if script.Stdout != "" {
+			content += "printf '%s' " + shellQuote(script.Stdout) + "\n"
+		}
+		if script.Stderr != "" {
+			content += "printf '%s' " + shellQuote(script.Stderr) + " >&2\n"
+		}
+		content += "exit " + strconv.Itoa(script.Exit) + "\n"
+		content += ";;\n"
+	}
+	content += "*) echo unexpected command \"$1\" >&2; exit 99;;\n"
+	content += "esac\n"
+
+	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+		t.Fatalf("write fake restic router: %v", err)
 	}
 }
 

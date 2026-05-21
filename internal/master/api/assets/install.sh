@@ -167,18 +167,31 @@ if ! "$agent_tmp" --help >/dev/null 2>&1; then
 fi
 install_file "$agent_tmp" "${INSTALL_DIR}/vaultfleet-agent"
 
-if [[ ! -x "${INSTALL_DIR}/restic" ]]; then
+if [[ ! -x "${INSTALL_DIR}/restic-real" ]]; then
 	echo "==> Downloading restic..."
-	ensure_command bunzip2 bzip2
-	ensure_command sha256sum coreutils
-    restic_archive="${tmp_dir}/restic.bz2"
-    restic_bin="${tmp_dir}/restic"
-    curl -fsSL "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_${OS}_${ARCH}.bz2" -o "$restic_archive"
-    verify_sha256 "$RESTIC_SHA256" "$restic_archive"
-    bunzip2 -c "$restic_archive" > "$restic_bin"
-    chmod +x "$restic_bin"
-	install_file "$restic_bin" "${INSTALL_DIR}/restic"
+	if [[ -x "${INSTALL_DIR}/restic" ]]; then
+		mv "${INSTALL_DIR}/restic" "${INSTALL_DIR}/restic-real"
+	else
+		ensure_command bunzip2 bzip2
+		ensure_command sha256sum coreutils
+		restic_archive="${tmp_dir}/restic.bz2"
+		restic_bin="${tmp_dir}/restic"
+		curl -fsSL "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_${OS}_${ARCH}.bz2" -o "$restic_archive"
+		verify_sha256 "$RESTIC_SHA256" "$restic_archive"
+		bunzip2 -c "$restic_archive" > "$restic_bin"
+		chmod +x "$restic_bin"
+		install_file "$restic_bin" "${INSTALL_DIR}/restic-real"
+	fi
 fi
+
+cat > "${INSTALL_DIR}/restic" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then
+    exec "${INSTALL_DIR}/restic-real" version
+fi
+exec "${INSTALL_DIR}/restic-real" "\$@"
+EOF
+chmod 755 "${INSTALL_DIR}/restic"
 
 if [[ ! -x "${INSTALL_DIR}/rclone" ]]; then
 	echo "==> Downloading rclone..."

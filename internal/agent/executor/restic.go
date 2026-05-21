@@ -76,6 +76,10 @@ func (r ResticRunner) buildSnapshotsCmd() *exec.Cmd {
 	return r.buildSnapshotsCmdContext(context.Background())
 }
 
+func (r ResticRunner) buildStatsCmd() *exec.Cmd {
+	return r.buildStatsCmdContext(context.Background())
+}
+
 func (r ResticRunner) buildRestoreCmd(snapshotID, targetPath string) *exec.Cmd {
 	return r.buildRestoreCmdContext(context.Background(), snapshotID, targetPath)
 }
@@ -118,6 +122,12 @@ func (r ResticRunner) buildSnapshotsCmdContext(ctx context.Context) *exec.Cmd {
 	return r.command(ctx, args...)
 }
 
+func (r ResticRunner) buildStatsCmdContext(ctx context.Context) *exec.Cmd {
+	args := []string{"stats", "--mode", "raw-data", "--json"}
+	args = append(args, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
 func (r ResticRunner) buildRestoreCmdContext(ctx context.Context, snapshotID, targetPath string) *exec.Cmd {
 	args := []string{"restore", snapshotID, "--target", targetPath}
 	args = append(args, r.baseArgs()...)
@@ -131,6 +141,12 @@ func (r ResticRunner) command(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 func (r ResticRunner) InitRepo(ctx context.Context) error {
+	if ok, err := r.repoExists(ctx); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+
 	cmd := r.buildInitCmdContext(ctx)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -144,10 +160,35 @@ func (r ResticRunner) InitRepo(ctx context.Context) error {
 	return nil
 }
 
+func (r ResticRunner) repoExists(ctx context.Context) (bool, error) {
+	cmd := r.buildSnapshotsCmdContext(ctx)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if isAlreadyInitializedRepo(stderr.String()) {
+			return true, nil
+		}
+		if isMissingRepository(stderr.String()) {
+			return false, nil
+		}
+		return false, commandError("check restic repository", stderr.String(), err)
+	}
+	return true, nil
+}
+
 func isAlreadyInitializedRepo(stderr string) bool {
 	normalized := strings.ToLower(stderr)
 	return strings.Contains(normalized, "already initialized") ||
 		strings.Contains(normalized, "config file already exists")
+}
+
+func isMissingRepository(stderr string) bool {
+	normalized := strings.ToLower(stderr)
+	return strings.Contains(normalized, "is there a repository at the following location") ||
+		strings.Contains(normalized, "repository does not exist") ||
+		strings.Contains(normalized, "unable to open repository") ||
+		strings.Contains(normalized, "config file does not exist")
 }
 
 func (r ResticRunner) RunBackup(ctx context.Context, dirs []string, excludes []string) (string, error) {
@@ -188,6 +229,25 @@ func (r ResticRunner) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
 		return nil, fmt.Errorf("parse restic snapshots JSON: %w", err)
 	}
 	return snapshots, nil
+}
+
+func (r ResticRunner) RepositorySize(ctx context.Context) (int64, error) {
+	cmd := r.buildStatsCmdContext(ctx)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return 0, commandError("read restic repository stats", stderr.String(), err)
+	}
+
+	var stats struct {
+		TotalSize int64 `json:"total_size"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &stats); err != nil {
+		return 0, fmt.Errorf("parse restic stats JSON: %w", err)
+	}
+	return stats.TotalSize, nil
 }
 
 func (r ResticRunner) RestoreSnapshot(ctx context.Context, snapshotID, targetPath string) error {
