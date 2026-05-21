@@ -2,10 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { listAgents } from "@/services/agents";
 import { listPolicies } from "@/services/policies";
 import { listTasks } from "@/services/tasks";
+import { checkReady } from "@/services/health";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Server, ShieldCheck, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { Server, ShieldCheck, CheckCircle2, XCircle, Clock, Activity } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { Link } from "react-router-dom";
@@ -15,6 +16,12 @@ export function DashboardPage() {
   const { data: agents } = useQuery({ queryKey: ["agents"], queryFn: listAgents });
   const { data: policies } = useQuery({ queryKey: ["policies"], queryFn: () => listPolicies() });
   const { data: tasks } = useQuery({ queryKey: ["tasks", { limit: 200 }], queryFn: () => listTasks({ limit: 200 }) });
+  
+  const { data: readyStatus } = useQuery({
+    queryKey: ["ready"],
+    queryFn: checkReady,
+    refetchInterval: 30000,
+  });
 
   const onlineNodes = agents?.filter((a) => a.status === "online").length || 0;
   const offlineNodes = agents?.filter((a) => a.status === "offline").length || 0;
@@ -31,7 +38,26 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">系统状态</CardTitle>
+            <Activity className={readyStatus?.ok ? "h-4 w-4 text-green-500" : "h-4 w-4 text-red-500"} />
+          </CardHeader>
+          <CardContent>
+            {readyStatus?.ok ? (
+              <>
+                <div className="text-2xl font-bold text-green-600">运行正常</div>
+                <p className="text-xs text-muted-foreground mt-1">系统已就绪</p>
+              </>
+            ) : (
+              <>
+                <div className="text-2xl font-bold text-red-600">未就绪</div>
+                <p className="text-xs text-red-500 mt-1 truncate" title={readyStatus?.error}>{readyStatus?.error || "无法连接服务器"}</p>
+              </>
+            )}
+          </CardContent>
+        </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">节点状态</CardTitle>
