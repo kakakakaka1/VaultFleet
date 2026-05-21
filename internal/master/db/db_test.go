@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,7 +44,7 @@ func TestDatabaseInit_CreatesDataDir(t *testing.T) {
 func TestDatabaseInit_DeduplicatesLegacySnapshotsBeforeUniqueIndex(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(dir, 0o755))
-	sqlDB, err := sql.Open("sqlite3", filepath.Join(dir, "vaultfleet.db"))
+	sqlDB, err := sql.Open("sqlite", filepath.Join(dir, "vaultfleet.db"))
 	require.NoError(t, err)
 	_, err = sqlDB.Exec(`
 		CREATE TABLE snapshots (
