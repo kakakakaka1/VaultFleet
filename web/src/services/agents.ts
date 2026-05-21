@@ -8,4 +8,4 @@ export const getAgent = (id: string) => apiGet<Agent>(`/api/agents/${id}`);
 export const deleteAgent = (id: string) => apiDelete(`/api/agents/${id}`);
 export const regenerateAgentToken = (id: string) => apiPost<CreateAgentResponse>(`/api/agents/${id}/regenerate-token`);
 export const browseAgent = (id: string, body: BrowseRequest) => apiPost<BrowseResponse>(`/api/agents/${id}/browse`, body);
-export const backupNow = (id: string) => apiPost<{ message_id: string }>(`/api/agents/${id}/backup-now`);
+export const backupNow = (id: string) => apiPost<{ command_id: string; message_id: string }>(`/api/agents/${id}/backup-now`);

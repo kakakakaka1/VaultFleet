@@ -9,6 +9,8 @@ export interface Snapshot {
 
 export interface SnapshotRefreshResponse {
   message_id: string;
+  command_id?: string;
+  message?: string;
 }
 
 export interface RestoreRequest {
@@ -18,4 +20,6 @@ export interface RestoreRequest {
 
 export interface RestoreAccepted {
   message_id: string;
+  command_id?: string;
+  message?: string;
 }
