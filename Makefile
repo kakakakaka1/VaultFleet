@@ -12,7 +12,7 @@ frontend-build:
 	cd web && npm run build
 
 build-master: frontend-build
-	CGO_ENABLED=1 go build $(LDFLAGS) -o bin/vaultfleet-master ./cmd/master
+	CGO_ENABLED=0 go build $(LDFLAGS) -o bin/vaultfleet-master ./cmd/master
 
 build-agent:
 	CGO_ENABLED=0 go build $(LDFLAGS) -o bin/vaultfleet-agent ./cmd/agent
