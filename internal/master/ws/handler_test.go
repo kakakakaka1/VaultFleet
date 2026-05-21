@@ -666,7 +666,7 @@ func TestHandler_FullRegistrationFlow(t *testing.T) {
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
 
-	cfg, err := agentenroll.Enroll(server.URL, "ek_full_flow", filepath.Join(t.TempDir(), "agent.yaml"))
+	cfg, err := agentenroll.Enroll(server.URL, "ek_full_flow", filepath.Join(t.TempDir(), "agent.yaml"), "")
 	require.NoError(t, err)
 	assert.Equal(t, agent.ID, cfg.AgentID)
 	assert.NotEmpty(t, cfg.AgentToken)
