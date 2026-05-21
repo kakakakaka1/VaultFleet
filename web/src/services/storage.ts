@@ -13,3 +13,10 @@ export const testUnsavedStorage = (body: { rclone_type: string; rclone_config: R
 
 export const testSavedStorage = (id: string) =>
   apiPost<StorageTestResult>(`/api/storage/${id}/test`);
+
+export interface S3Provider {
+  value: string;
+  help: string;
+}
+
+export const listProviders = () => apiGet<S3Provider[]>("/api/storage/providers");

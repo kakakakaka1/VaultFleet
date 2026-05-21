@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { listStorage, createStorage, updateStorage, deleteStorage, testUnsavedStorage, testSavedStorage } from "@/services/storage";
+import { listStorage, createStorage, updateStorage, deleteStorage, testUnsavedStorage, testSavedStorage, listProviders } from "@/services/storage";
 import { StorageConfig, StorageInput } from "@/types/storage";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,7 +29,7 @@ const STORAGE_TEMPLATES: Record<string, { name: string; defaults: Record<string,
     name: "Amazon S3 / 兼容对象存储",
     defaults: { provider: "AWS", region: "us-east-1" },
     fields: [
-      { key: "provider", label: "Provider (AWS, Alibaba, etc.)" },
+      { key: "provider", label: "Provider" },
       { key: "access_key_id", label: "Access Key ID" },
       { key: "secret_access_key", label: "Secret Access Key", type: "password" },
       { key: "region", label: "Region" },
@@ -76,6 +76,7 @@ export function StoragePage() {
   });
 
   const { data: storageList, isLoading } = useQuery({ queryKey: ["storage"], queryFn: listStorage });
+  const { data: s3Providers } = useQuery({ queryKey: ["s3-providers"], queryFn: listProviders });
 
   const testMutation = useMutation({
     mutationFn: (body: { rclone_type: string; rclone_config: Record<string, string> }) => 
@@ -230,16 +231,38 @@ export function StoragePage() {
                       template.fields.map((f) => (
                         <div key={f.key} className="space-y-2">
                           <Label htmlFor={`field-${f.key}`}>{f.label}</Label>
-                          <Input
-                            id={`field-${f.key}`}
-                            type={f.type || "text"}
-                            value={formData.rclone_config[f.key] || ""}
-                            onChange={(e) => setFormData({
-                              ...formData,
-                              rclone_config: { ...formData.rclone_config, [f.key]: e.target.value }
-                            })}
-                            placeholder={formData.rclone_config[f.key] === "[redacted]" ? "已加密 (输入以修改)" : ""}
-                          />
+                          {f.key === "provider" && formData.rclone_type === "s3" && s3Providers && s3Providers.length > 0 ? (
+                            <Select
+                              value={formData.rclone_config[f.key] || ""}
+                              onValueChange={(val) => setFormData({
+                                ...formData,
+                                rclone_config: { ...formData.rclone_config, [f.key]: val }
+                              })}
+                            >
+                              <SelectTrigger id={`field-${f.key}`}>
+                                <SelectValue placeholder="选择 Provider" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {s3Providers.map((p) => (
+                                  <SelectItem key={p.value} value={p.value}>
+                                    {p.value}
+                                    {p.help && <span className="ml-2 text-muted-foreground text-xs">— {p.help}</span>}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          ) : (
+                            <Input
+                              id={`field-${f.key}`}
+                              type={f.type || "text"}
+                              value={formData.rclone_config[f.key] || ""}
+                              onChange={(e) => setFormData({
+                                ...formData,
+                                rclone_config: { ...formData.rclone_config, [f.key]: e.target.value }
+                              })}
+                              placeholder={formData.rclone_config[f.key] === "[redacted]" ? "已加密 (输入以修改)" : ""}
+                            />
+                          )}
                         </div>
                       ))
                     ) : (
