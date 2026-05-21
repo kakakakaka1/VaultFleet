@@ -43,6 +43,33 @@ func TestParseS3Providers(t *testing.T) {
 	assert.Equal(t, S3Provider{Value: "Cloudflare", Help: "Cloudflare R2 Storage"}, providers[2])
 }
 
+func TestParseS3ProvidersRawArray(t *testing.T) {
+	input := []byte(`[
+		{
+			"Name": "s3",
+			"Options": [
+				{
+					"Name": "provider",
+					"Examples": [
+						{"Value": "AWS", "Help": "Amazon Web Services"},
+						{"Value": "Minio", "Help": "Minio Object Storage"}
+					]
+				}
+			]
+		},
+		{
+			"Name": "drive",
+			"Options": []
+		}
+	]`)
+
+	providers, err := ParseS3Providers(input)
+	require.NoError(t, err)
+	require.Len(t, providers, 2)
+	assert.Equal(t, "AWS", providers[0].Value)
+	assert.Equal(t, "Minio", providers[1].Value)
+}
+
 func TestParseS3ProvidersNoS3Backend(t *testing.T) {
 	input := []byte(`{"providers": [{"Name": "drive", "Options": []}]}`)
 

@@ -11,24 +11,30 @@ type S3Provider struct {
 	Help  string `json:"help"`
 }
 
+type rcloneBackend struct {
+	Name    string `json:"Name"`
+	Options []struct {
+		Name     string `json:"Name"`
+		Examples []struct {
+			Value string `json:"Value"`
+			Help  string `json:"Help"`
+		} `json:"Examples"`
+	} `json:"Options"`
+}
+
 func ParseS3Providers(data []byte) ([]S3Provider, error) {
-	var result struct {
-		Providers []struct {
-			Name    string `json:"Name"`
-			Options []struct {
-				Name     string `json:"Name"`
-				Examples []struct {
-					Value string `json:"Value"`
-					Help  string `json:"Help"`
-				} `json:"Examples"`
-			} `json:"Options"`
-		} `json:"providers"`
-	}
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, err
+	var backends []rcloneBackend
+	if err := json.Unmarshal(data, &backends); err != nil {
+		var wrapped struct {
+			Providers []rcloneBackend `json:"providers"`
+		}
+		if err2 := json.Unmarshal(data, &wrapped); err2 != nil {
+			return nil, err
+		}
+		backends = wrapped.Providers
 	}
 
-	for _, backend := range result.Providers {
+	for _, backend := range backends {
 		if backend.Name != "s3" {
 			continue
 		}
