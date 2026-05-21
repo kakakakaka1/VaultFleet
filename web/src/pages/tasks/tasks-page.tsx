@@ -1,22 +1,32 @@
 import { useState, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { listTasks } from "@/services/tasks";
-import { listAgents } from "@/services/agents";
+import { listAgents, backupNow } from "@/services/agents";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Card } from "@/components/ui/card";
-import { ChevronDown, ChevronUp, Search, XCircle, Info, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronUp, Search, XCircle, Info, RefreshCw, Play } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 
 export function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [backupAgentId, setBackupAgentId] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const filters = useMemo(() => ({
     agent_id: searchParams.get("agent_id") || undefined,
@@ -39,6 +49,18 @@ export function TasksPage() {
 
   const { data: agents } = useQuery({ queryKey: ["agents"], queryFn: listAgents });
 
+  const backupMutation = useMutation({
+    mutationFn: (agentId: string) => backupNow(agentId),
+    onSuccess: () => {
+      setBackupAgentId(null);
+      toast.success("备份命令已下发");
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error: any) => {
+      toast.error("发起备份失败", { description: error.message });
+    },
+  });
+
   const handleFilterChange = (key: string, value: string) => {
     const newParams = new URLSearchParams(searchParams);
     if (value && value !== "all") {
@@ -53,10 +75,31 @@ export function TasksPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight">任务历史</h1>
-        <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
-          <RefreshCw className={cn("mr-2 h-4 w-4", isFetching && "animate-spin")} />
-          刷新
-        </Button>
+        <div className="flex gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm">
+                <Play className="mr-2 h-4 w-4" />
+                手动备份
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {agents?.length === 0 ? (
+                <DropdownMenuItem disabled>暂无节点</DropdownMenuItem>
+              ) : (
+                agents?.map((a) => (
+                  <DropdownMenuItem key={a.id} onClick={() => setBackupAgentId(a.id)}>
+                    {a.name}
+                  </DropdownMenuItem>
+                ))
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+            <RefreshCw className={cn("mr-2 h-4 w-4", isFetching && "animate-spin")} />
+            刷新
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-4 items-end bg-muted/30 p-4 rounded-lg border">
@@ -219,6 +262,17 @@ export function TasksPage() {
           </TableBody>
         </Table>
       </div>
+
+      <ConfirmDialog
+        open={!!backupAgentId}
+        onOpenChange={(open) => !open && setBackupAgentId(null)}
+        title="确认手动备份"
+        description={`将对节点 ${agents?.find(a => a.id === backupAgentId)?.name || backupAgentId} 发起立即备份。`}
+        confirmText="立即备份"
+        onConfirm={() => backupAgentId && backupMutation.mutate(backupAgentId)}
+        loading={backupMutation.isPending}
+        variant="default"
+      />
     </div>
   );
 }

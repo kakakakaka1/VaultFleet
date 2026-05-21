@@ -32,6 +32,7 @@ type RouterConfig struct {
 	CommandService *commands.Service
 	EventBus       *events.Bus
 	AgentWebSocket gin.HandlerFunc
+	Version        string
 }
 
 type PolicyPushTracker struct {
@@ -138,6 +139,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	commandHandler := NewCommandHandler(cfg.Database)
 	notificationHandler := NewNotificationHandler(cfg.Database)
 	systemHandler := NewSystemHandler(cfg.Database)
+	systemHandler.Version = cfg.Version
 	healthHandler := NewHealthHandler(cfg.Database, cfg.Hub)
 
 	public := r.Group("/api")
@@ -154,6 +156,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 
 	protected := r.Group("/api")
 	protected.Use(RequireInit(cfg.Database), RequireAuth(authHandler.Sessions))
+	protected.POST("/auth/logout", authHandler.Logout)
 	protected.POST("/agents", agentHandler.Create)
 	protected.GET("/agents", agentHandler.List)
 	protected.GET("/agents/:id", agentHandler.Get)

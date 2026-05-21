@@ -232,6 +232,22 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, authUserResponse(user.Username))
 }
 
+func (h *AuthHandler) Logout(c *gin.Context) {
+	if token, err := c.Cookie(sessionCookieName); err == nil {
+		h.Sessions.Delete(token)
+	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsSecure(c.Request),
+	})
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 type initRequest struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required,min=6"`

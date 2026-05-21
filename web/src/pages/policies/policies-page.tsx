@@ -27,6 +27,8 @@ import { DirectoryBrowser } from "@/components/directory-browser";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
+import { toast } from "sonner";
+import { describeCron } from "@/lib/cron";
 
 export function PoliciesPage() {
   const queryClient = useQueryClient();
@@ -65,6 +67,10 @@ export function PoliciesPage() {
         setIsDrawerOpen(false);
       }
       queryClient.invalidateQueries({ queryKey: ["policies"] });
+      toast.success("策略已创建");
+    },
+    onError: (error: any) => {
+      toast.error("创建策略失败", { description: error.message });
     },
   });
 
@@ -73,6 +79,10 @@ export function PoliciesPage() {
     onSuccess: () => {
       setIsDrawerOpen(false);
       queryClient.invalidateQueries({ queryKey: ["policies"] });
+      toast.success("策略已更新");
+    },
+    onError: (error: any) => {
+      toast.error("更新策略失败", { description: error.message });
     },
   });
 
@@ -81,6 +91,10 @@ export function PoliciesPage() {
     onSuccess: () => {
       setConfirmDeleteId(null);
       queryClient.invalidateQueries({ queryKey: ["policies"] });
+      toast.success("策略已删除");
+    },
+    onError: (error: any) => {
+      toast.error("删除策略失败", { description: error.message });
     },
   });
 
@@ -272,7 +286,10 @@ export function PoliciesPage() {
                     onChange={(e) => setFormData({ ...formData, schedule: e.target.value })}
                     placeholder="0 2 * * *"
                   />
-                  <p className="text-xs text-muted-foreground">标准的 Cron 表达式（分 时 日 月 周）。</p>
+                  <p className="text-xs text-muted-foreground">
+                    {describeCron(formData.schedule)}
+                    {" — "}标准 Cron 表达式（分 时 日 月 周）。
+                  </p>
                 </div>
 
                 <div className="space-y-4 border-t pt-4">
@@ -322,7 +339,12 @@ export function PoliciesPage() {
                   <TableCell className="font-medium">
                     {agents?.find(a => a.id === p.agent_id)?.name || p.agent_id}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{p.schedule}</TableCell>
+                  <TableCell>
+                    <div className="space-y-0.5">
+                      <div className="font-mono text-xs">{p.schedule}</div>
+                      <div className="text-[10px] text-muted-foreground">{describeCron(p.schedule)}</div>
+                    </div>
+                  </TableCell>
                   <TableCell>
                     <StatusBadge status={p.synced ? "success" : "unsynced"} />
                   </TableCell>

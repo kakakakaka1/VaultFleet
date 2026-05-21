@@ -26,6 +26,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorPanel } from "@/components/error-panel";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
+import { toast } from "sonner";
 
 const EVENT_OPTIONS = [
   { id: "backup_failed", label: "备份失败" },
@@ -53,6 +54,10 @@ export function NotificationsPage() {
     onSuccess: () => {
       setIsDrawerOpen(false);
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      toast.success("通知配置已创建");
+    },
+    onError: (error: any) => {
+      toast.error("创建通知失败", { description: error.message });
     },
   });
 
@@ -61,6 +66,10 @@ export function NotificationsPage() {
     onSuccess: () => {
       setIsDrawerOpen(false);
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      toast.success("通知配置已更新");
+    },
+    onError: (error: any) => {
+      toast.error("更新通知失败", { description: error.message });
     },
   });
 
@@ -69,6 +78,10 @@ export function NotificationsPage() {
     onSuccess: () => {
       setConfirmDeleteId(null);
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      toast.success("通知配置已删除");
+    },
+    onError: (error: any) => {
+      toast.error("删除通知失败", { description: error.message });
     },
   });
 
@@ -76,7 +89,11 @@ export function NotificationsPage() {
     mutationFn: testNotification,
     onSuccess: (_, id) => {
       setTestSuccessId(id);
+      toast.success("测试消息已发送");
       setTimeout(() => setTestSuccessId(null), 3000);
+    },
+    onError: (error: any) => {
+      toast.error("发送测试消息失败", { description: error.message });
     },
   });
 

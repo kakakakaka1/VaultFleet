@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -57,6 +58,10 @@ func (h *HealthHandler) Metrics(c *gin.Context) {
 
 func (h *HealthHandler) ready(c *gin.Context) bool {
 	if h == nil || h.DB == nil || h.DB.DB == nil || len(h.DB.MasterKey) != 32 || strings.TrimSpace(h.DB.DataDir) == "" {
+		return false
+	}
+
+	if _, err := os.Stat(h.DB.DataDir); err != nil {
 		return false
 	}
 

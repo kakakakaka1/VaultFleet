@@ -173,7 +173,7 @@ export function NodeDetailPage() {
                 <div className="flex justify-between"><span className="text-muted-foreground">操作系统</span><span>{agent.os}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">架构</span><span>{agent.arch}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">主机名</span><span>{agent.hostname}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Agent 版本</span><span>v{agent.version}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Agent 版本</span><span>{agent.version ? `v${agent.version}` : "未知"}</span></div>
               </CardContent>
             </Card>
             <Card>

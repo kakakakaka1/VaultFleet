@@ -1,4 +1,6 @@
-import { apiPut, ApiError } from "./http";
+import { apiGet, apiPut, ApiError } from "./http";
+
+export const getSystemVersion = () => apiGet<{ version: string }>("/api/system/version");
 
 export const changePassword = (body: { current_password: string; new_password: string }) => apiPut<{ ok: true }>("/api/system/password", body);
 

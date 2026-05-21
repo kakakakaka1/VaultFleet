@@ -6,7 +6,7 @@ import { checkReady } from "@/services/health";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Server, ShieldCheck, CheckCircle2, XCircle, Clock, Activity } from "lucide-react";
+import { Server, ShieldCheck, CheckCircle2, XCircle, Clock, Activity, Plus, Database } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { Link } from "react-router-dom";
@@ -98,6 +98,21 @@ export function DashboardPage() {
             <p className="text-xs text-muted-foreground mt-1">最近 24 小时</p>
           </CardContent>
         </Card>
+      </div>
+
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-bold">快捷操作</h2>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" size="sm" asChild>
+          <Link to="/nodes"><Plus className="mr-1 h-3 w-3" />添加节点</Link>
+        </Button>
+        <Button variant="outline" size="sm" asChild>
+          <Link to="/storage"><Database className="mr-1 h-3 w-3" />添加存储</Link>
+        </Button>
+        <Button variant="outline" size="sm" asChild>
+          <Link to="/policies"><ShieldCheck className="mr-1 h-3 w-3" />创建策略</Link>
+        </Button>
       </div>
 
       <div className="flex items-center justify-between">

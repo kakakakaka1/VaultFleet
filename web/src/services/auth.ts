@@ -10,3 +10,4 @@ export const checkAuth = async (): Promise<AuthCheck> => {
 };
 export const initAdmin = (body: AuthCredentials) => apiPost<AuthUser>("/api/auth/init", body);
 export const login = (body: AuthCredentials) => apiPost<AuthUser>("/api/auth/login", body);
+export const logout = () => apiPost<void>("/api/auth/logout");

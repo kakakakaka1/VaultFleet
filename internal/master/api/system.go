@@ -18,7 +18,8 @@ import (
 )
 
 type SystemHandler struct {
-	DB *db.Database
+	DB      *db.Database
+	Version string
 }
 
 func NewSystemHandler(database *db.Database) *SystemHandler {
@@ -26,10 +27,19 @@ func NewSystemHandler(database *db.Database) *SystemHandler {
 }
 
 func RegisterSystemRoutes(rg *gin.RouterGroup, h *SystemHandler) {
+	rg.GET("/version", h.GetVersion)
 	rg.GET("/export", h.Export)
 	rg.POST("/import", h.Import)
 	rg.POST("/import/confirm", h.ImportConfirm)
 	rg.PUT("/password", h.ChangePassword)
+}
+
+func (h *SystemHandler) GetVersion(c *gin.Context) {
+	v := h.Version
+	if v == "" {
+		v = "dev"
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{"version": v}})
 }
 
 func (h *SystemHandler) Export(c *gin.Context) {

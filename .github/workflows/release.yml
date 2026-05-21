@@ -68,6 +68,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -97,7 +99,7 @@ jobs:
         run: |
           mkdir -p dist
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -ldflags="-s -w" -o dist/vaultfleet-agent-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/agent
+            go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/vaultfleet-agent-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/agent
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

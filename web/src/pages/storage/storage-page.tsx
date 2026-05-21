@@ -117,6 +117,10 @@ export function StoragePage() {
     onSuccess: () => {
       setIsAddDrawerOpen(false);
       queryClient.invalidateQueries({ queryKey: ["storage"] });
+      toast.success("存储配置已创建");
+    },
+    onError: (error: any) => {
+      toast.error("创建存储失败", { description: error.message });
     },
   });
 
@@ -125,6 +129,10 @@ export function StoragePage() {
     onSuccess: () => {
       setIsAddDrawerOpen(false);
       queryClient.invalidateQueries({ queryKey: ["storage"] });
+      toast.success("存储配置已更新");
+    },
+    onError: (error: any) => {
+      toast.error("更新存储失败", { description: error.message });
     },
   });
 
@@ -133,6 +141,10 @@ export function StoragePage() {
     onSuccess: () => {
       setConfirmDeleteId(null);
       queryClient.invalidateQueries({ queryKey: ["storage"] });
+      toast.success("存储配置已删除");
+    },
+    onError: (error: any) => {
+      toast.error("删除存储失败", { description: error.message });
     },
   });
 

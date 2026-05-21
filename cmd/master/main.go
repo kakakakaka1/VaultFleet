@@ -20,6 +20,8 @@ import (
 	"vaultfleet/internal/master/ws"
 )
 
+var version string
+
 type masterRuntime struct {
 	hub            *ws.Hub
 	bus            *events.Bus
@@ -137,6 +139,7 @@ func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options
 		CommandService: commandService,
 		EventBus:       bus,
 		AgentWebSocket: wsHandler.HandleWebSocket,
+		Version:        version,
 	})
 
 	return masterRuntime{

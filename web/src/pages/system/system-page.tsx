@@ -1,13 +1,13 @@
 import { useState, useRef } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { changePassword, exportSystemData, importSystemData, confirmImport, ImportValidationResult } from "@/services/system";
+import { changePassword, exportSystemData, importSystemData, confirmImport, ImportValidationResult, getSystemVersion } from "@/services/system";
 import { checkHealth, checkReady } from "@/services/health";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { ErrorPanel } from "@/components/error-panel";
-import { Download, ShieldCheck, CheckCircle2, Activity, Server, Database, KeyRound, FolderTree, AlertCircle, RefreshCw, Upload } from "lucide-react";
+import { Download, ShieldCheck, CheckCircle2, Activity, Server, Database, KeyRound, FolderTree, AlertCircle, RefreshCw, Upload, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import { StatusBadge } from "@/components/status-badge";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -31,6 +31,11 @@ export function SystemPage() {
     queryKey: ["ready"],
     queryFn: checkReady,
     refetchInterval: 30000,
+  });
+
+  const { data: versionInfo } = useQuery({
+    queryKey: ["system-version"],
+    queryFn: getSystemVersion,
   });
 
   const passwordMutation = useMutation({
@@ -143,10 +148,17 @@ export function SystemPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Activity className="h-5 w-5 text-primary" />
-            系统状态
-          </CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Activity className="h-5 w-5 text-primary" />
+              系统状态
+            </CardTitle>
+            {versionInfo?.version && (
+              <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded">
+                {versionInfo.version}
+              </span>
+            )}
+          </div>
           <CardDescription>Master 服务运行及依赖组件就绪状态。</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-6 md:grid-cols-2">
@@ -315,6 +327,31 @@ export function SystemPage() {
           </CardFooter>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">问题反馈</CardTitle>
+          <CardDescription>遇到 Bug 或有建议？提交 Issue 到 GitHub。</CardDescription>
+        </CardHeader>
+        <CardFooter>
+          <Button
+            variant="outline"
+            onClick={() => {
+              const params = new URLSearchParams({
+                template: "bug_report.yml",
+                version: versionInfo?.version || "unknown",
+              });
+              window.open(
+                `https://github.com/momo-z/VaultFleet/issues/new?${params.toString()}`,
+                "_blank"
+              );
+            }}
+          >
+            <ExternalLink className="mr-2 h-4 w-4" />
+            提交 Issue
+          </Button>
+        </CardFooter>
+      </Card>
 
       <ConfirmDialog
         open={showImportConfirm}

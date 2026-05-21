@@ -12,6 +12,7 @@ import {
   User,
   ChevronRight,
   Menu,
+  LogOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,8 +25,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { listAgents } from "@/services/agents";
+import { logout } from "@/services/auth";
 
 interface AppLayoutProps {
   user: AuthUser;
@@ -44,6 +46,7 @@ const navItems = [
 
 export function AppLayout({ user }: AppLayoutProps) {
   const location = useLocation();
+  const queryClient = useQueryClient();
   const { data: agents } = useQuery({
     queryKey: ["agents"],
     queryFn: listAgents,
@@ -132,6 +135,18 @@ export function AppLayout({ user }: AppLayoutProps) {
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>
                   <Link to="/system">修改密码</Link>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => {
+                    logout().finally(() => {
+                      queryClient.clear();
+                      window.location.href = "/login";
+                    });
+                  }}
+                >
+                  <LogOut className="mr-2 h-4 w-4" />
+                  退出登录
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
