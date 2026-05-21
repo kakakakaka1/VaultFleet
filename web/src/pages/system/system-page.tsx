@@ -1,21 +1,25 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { changePassword, exportSystemData } from "@/services/system";
+import { changePassword, exportSystemData, importSystemData, confirmImport, ImportValidationResult } from "@/services/system";
 import { checkHealth, checkReady } from "@/services/health";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { ErrorPanel } from "@/components/error-panel";
-import { Download, ShieldCheck, CheckCircle2, Activity, Server, Database, KeyRound, FolderTree, AlertCircle, RefreshCw } from "lucide-react";
+import { Download, ShieldCheck, CheckCircle2, Activity, Server, Database, KeyRound, FolderTree, AlertCircle, RefreshCw, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { StatusBadge } from "@/components/status-badge";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 
 export function SystemPage() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState(false);
+  const [importResult, setImportResult] = useState<ImportValidationResult | null>(null);
+  const [showImportConfirm, setShowImportConfirm] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: healthStatus, refetch: refetchHealth, isFetching: healthFetching } = useQuery({
     queryKey: ["health"],
@@ -60,6 +64,56 @@ export function SystemPage() {
       toast.error("数据导出失败", { description: error.message });
     }
   });
+
+  const importMutation = useMutation({
+    mutationFn: importSystemData,
+    onSuccess: (result) => {
+      if (result.valid) {
+        setImportResult(result);
+        setShowImportConfirm(true);
+      } else {
+        setImportResult(result);
+        toast.error("备份文件验证失败", {
+          description: result.errors.join("；"),
+        });
+      }
+    },
+    onError: (error: any) => {
+      toast.error("上传失败", { description: error.message });
+    },
+  });
+
+  const confirmMutation = useMutation({
+    mutationFn: confirmImport,
+    onSuccess: () => {
+      setShowImportConfirm(false);
+      toast.success("导入已确认，Master 正在重启...");
+      const poll = setInterval(async () => {
+        try {
+          const res = await fetch("/health");
+          if (res.ok) {
+            clearInterval(poll);
+            window.location.reload();
+          }
+        } catch {}
+      }, 2000);
+    },
+    onError: (error: any) => {
+      toast.error("确认导入失败", { description: error.message });
+    },
+  });
+
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      importMutation.mutate(file);
+      e.target.value = "";
+    }
+  };
 
   const handlePasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -211,30 +265,66 @@ export function SystemPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>数据导出</CardTitle>
-            <CardDescription>导出 Master 节点的完整数据库。建议在进行系统迁移或重大更新前导出备份。</CardDescription>
+            <CardTitle>数据管理</CardTitle>
+            <CardDescription>导出或导入 Master 节点的完整数据。建议在进行系统迁移或重大更新前导出备份。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-col items-center justify-center py-8 text-center space-y-4 bg-muted/20 rounded-lg border-2 border-dashed">
               <ShieldCheck className="h-12 w-12 text-muted-foreground opacity-30" />
               <p className="text-sm text-muted-foreground px-6">
-                导出的压缩包包含 SQLite 数据库文件。请务必加密存储导出的文件。
+                导出的压缩包包含 SQLite 数据库和加密密钥。请务必加密存储导出的文件。
               </p>
             </div>
+            {importResult && !importResult.valid && (
+              <div className="text-xs text-red-600 bg-red-50 p-3 rounded border border-red-200">
+                <div className="font-bold mb-1">验证失败：</div>
+                <ul className="list-disc list-inside">
+                  {importResult.errors.map((err, i) => (
+                    <li key={i}>{err}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </CardContent>
-          <CardFooter>
-            <Button 
-              variant="outline" 
-              className="w-full" 
+          <CardFooter className="flex gap-2">
+            <Button
+              variant="outline"
+              className="flex-1"
               onClick={() => exportMutation.mutate()}
               disabled={exportMutation.isPending}
             >
-              <Download className="mr-2 h-4 w-4" /> 
-              {exportMutation.isPending ? "正在生成导出文件..." : "导出 Master 数据"}
+              <Download className="mr-2 h-4 w-4" />
+              {exportMutation.isPending ? "正在导出..." : "导出数据"}
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".zip"
+              className="hidden"
+              onChange={handleFileChange}
+            />
+            <Button
+              variant="outline"
+              className="flex-1"
+              onClick={handleImportClick}
+              disabled={importMutation.isPending}
+            >
+              <Upload className="mr-2 h-4 w-4" />
+              {importMutation.isPending ? "正在验证..." : "导入数据"}
             </Button>
           </CardFooter>
         </Card>
       </div>
+
+      <ConfirmDialog
+        open={showImportConfirm}
+        onOpenChange={(open) => !open && setShowImportConfirm(false)}
+        title="确认导入备份数据"
+        description="导入将替换当前所有 Master 数据，Master 将自动重启。当前数据会保存到 rollback 目录。此操作不可撤销，是否继续？"
+        confirmText="确认导入并重启"
+        onConfirm={() => confirmMutation.mutate()}
+        loading={confirmMutation.isPending}
+      />
     </div>
   );
 }
