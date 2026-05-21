@@ -1,9 +1,11 @@
+import React, { useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { getAgent } from "@/services/agents";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { getAgent, backupNow } from "@/services/agents";
 import { listPolicies } from "@/services/policies";
 import { listTasks } from "@/services/tasks";
-import { listSnapshots } from "@/services/snapshots";
+import { listSnapshots, restoreSnapshot } from "@/services/snapshots";
+import { listAgentCommands } from "@/services/commands";
 import { StatusBadge } from "@/components/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,9 +14,31 @@ import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DirectoryBrowser } from "@/components/directory-browser";
+import { Button } from "@/components/ui/button";
+import { Play, RotateCcw, Info, CheckCircle2, AlertCircle, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
+import { ConfirmDialog } from "@/components/confirm-dialog";
+import { toast } from "sonner";
+import { Snapshot } from "@/types/snapshot";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+
+const COMMAND_TYPE_LABELS: Record<string, string> = {
+  backup_now: "手动备份",
+  restore_req: "恢复",
+  policy_push: "策略下发",
+  snapshot_list_req: "快照刷新",
+};
 
 export function NodeDetailPage() {
   const { agentId } = useParams<{ agentId: string }>();
+  const queryClient = useQueryClient();
+  const [selectedSnapshot, setSelectedSnapshot] = useState<Snapshot | null>(null);
+  const [targetPath, setTargetPath] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [expandedTaskId, setExpandedTaskId] = useState<number | null>(null);
+  const [confirmBackupOpen, setConfirmBackupOpen] = useState(false);
 
   const { data: agent, isLoading: agentLoading } = useQuery({
     queryKey: ["agent", agentId],
@@ -40,6 +64,49 @@ export function NodeDetailPage() {
     enabled: !!agentId,
   });
 
+  const { data: commands, isFetching: commandsFetching, refetch: refetchCommands } = useQuery({
+    queryKey: ["commands", agentId],
+    queryFn: () => listAgentCommands(agentId!),
+    enabled: !!agentId,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const hasActive = data?.some(
+        (c) => c.status === "pending" || c.status === "dispatched" || c.status === "running"
+      );
+      return hasActive ? 5000 : false;
+    },
+  });
+
+  const backupMutation = useMutation({
+    mutationFn: () => backupNow(agentId!),
+    onSuccess: (data) => {
+      if (agent?.status === "online") {
+        toast.success("备份命令已下发", { description: `Message ID: ${data.message_id}` });
+      } else {
+        toast.info("备份命令已排队", { description: "Agent 上线后将自动执行" });
+      }
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error: any) => {
+      toast.error("发起备份失败", { description: error.message });
+    }
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: (body: { snapshot_id: string; target_path: string }) => 
+      restoreSnapshot(agentId!, body),
+    onSuccess: (data) => {
+      const msg = data.message === "restore queued" ? "恢复命令已排队" : "恢复任务已开始";
+      toast.success(msg, { description: `Message ID: ${data.message_id}` });
+      setSelectedSnapshot(null);
+      setConfirmed(false);
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error: any) => {
+      toast.error("发起恢复失败", { description: error.message });
+    }
+  });
+
   if (agentLoading) {
     return <div className="space-y-4"><Skeleton className="h-12 w-full" /><Skeleton className="h-[400px] w-full" /></div>;
   }
@@ -47,6 +114,12 @@ export function NodeDetailPage() {
   if (!agent) {
     return <div>节点未找到</div>;
   }
+
+  const handleRestoreClick = (s: Snapshot) => {
+    setSelectedSnapshot(s);
+    setTargetPath(s.paths[0] || "");
+    setConfirmed(false);
+  };
 
   return (
     <div className="space-y-6">
@@ -57,6 +130,25 @@ export function NodeDetailPage() {
             <StatusBadge status={agent.status} />
             <span>ID: {agent.id}</span>
           </div>
+        </div>
+        <div className="flex gap-2">
+          <Button disabled={backupMutation.isPending} onClick={() => setConfirmBackupOpen(true)}>
+            <Play className="mr-2 h-4 w-4" />
+            立即备份
+          </Button>
+          <ConfirmDialog
+            open={confirmBackupOpen}
+            onOpenChange={setConfirmBackupOpen}
+            title="确认立即备份"
+            description={`将对节点 ${agent.name} 发起立即备份请求。`}
+            onConfirm={() => {
+              setConfirmBackupOpen(false);
+              backupMutation.mutate();
+            }}
+            loading={backupMutation.isPending}
+            variant="default"
+            confirmText="立即备份"
+          />
         </div>
       </div>
 
@@ -139,7 +231,12 @@ export function NodeDetailPage() {
                     <TableCell className="font-mono text-xs">{s.id.substring(0, 8)}</TableCell>
                     <TableCell className="text-xs">{format(new Date(s.time), "yyyy-MM-dd HH:mm:ss", { locale: zhCN })}</TableCell>
                     <TableCell className="text-xs truncate max-w-[300px]">{s.paths.join(", ")}</TableCell>
-                    <TableCell className="text-right text-sm text-primary cursor-pointer">恢复</TableCell>
+                    <TableCell className="text-right">
+                      <Button variant="ghost" size="sm" className="text-primary" onClick={() => handleRestoreClick(s)}>
+                        <RotateCcw className="mr-1 h-3 w-3" />
+                        恢复
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 )) || <TableRow><TableCell colSpan={4} className="text-center py-4">暂无快照</TableCell></TableRow>}
               </TableBody>
@@ -152,6 +249,7 @@ export function NodeDetailPage() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-10"></TableHead>
                   <TableHead>类型</TableHead>
                   <TableHead>状态</TableHead>
                   <TableHead>时间</TableHead>
@@ -160,13 +258,129 @@ export function NodeDetailPage() {
               </TableHeader>
               <TableBody>
                 {tasks?.map((t) => (
-                  <TableRow key={t.id}>
-                    <TableCell>{t.type === "backup" ? "备份" : "恢复"}</TableCell>
-                    <TableCell><StatusBadge status={t.status} /></TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{format(new Date(t.created_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN })}</TableCell>
-                    <TableCell className="text-right text-sm text-primary cursor-pointer">详情</TableCell>
+                  <React.Fragment key={t.id}>
+                    <TableRow className="group">
+                      <TableCell>
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          className="h-8 w-8"
+                          onClick={() => setExpandedTaskId(expandedTaskId === t.id ? null : t.id)}
+                        >
+                          {expandedTaskId === t.id ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                        </Button>
+                      </TableCell>
+                      <TableCell>{t.type === "backup" ? "备份" : "恢复"}</TableCell>
+                      <TableCell><StatusBadge status={t.status} /></TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{format(new Date(t.created_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN })}</TableCell>
+                      <TableCell className="text-right">
+                        <Button variant="ghost" size="sm" className="text-primary" onClick={() => setExpandedTaskId(expandedTaskId === t.id ? null : t.id)}>
+                          详情
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                    {expandedTaskId === t.id && (
+                      <TableRow className="bg-muted/30">
+                        <TableCell colSpan={5}>
+                          <div className="p-4 grid gap-4 md:grid-cols-2 text-xs">
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold w-24">Message ID:</span>
+                                <code className="bg-muted px-1 rounded">{t.message_id}</code>
+                              </div>
+                              {t.command_id && (
+                                <div className="flex items-center gap-2">
+                                  <span className="font-semibold w-24">Command ID:</span>
+                                  <code className="bg-muted px-1 rounded">{t.command_id}</code>
+                                </div>
+                              )}
+                              {t.snapshot_id && (
+                                <div className="flex items-center gap-2">
+                                  <span className="font-semibold w-24">Snapshot ID:</span>
+                                  <code className="bg-muted px-1 rounded">{t.snapshot_id}</code>
+                                </div>
+                              )}
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold w-24">开始时间:</span>
+                                <span>{t.started_at ? format(new Date(t.started_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN }) : "-"}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold w-24">结束时间:</span>
+                                <span>{t.finished_at ? format(new Date(t.finished_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN }) : "-"}</span>
+                              </div>
+                            </div>
+                            <div className="space-y-2">
+                              {t.duration_ms !== undefined && (
+                                <div className="flex items-center gap-2">
+                                  <span className="font-semibold w-24">耗时:</span>
+                                  <span>{(t.duration_ms / 1000).toFixed(2)}s</span>
+                                </div>
+                              )}
+                              {t.repo_size !== undefined && (
+                                <div className="flex items-center gap-2">
+                                  <span className="font-semibold w-24">仓库大小:</span>
+                                  <span>{(t.repo_size / 1024 / 1024).toFixed(2)} MB</span>
+                                </div>
+                              )}
+                              {t.error_log && (
+                                <div className="space-y-1">
+                                  <span className="font-semibold block">错误日志:</span>
+                                  <pre className="bg-red-50 text-red-600 p-2 rounded whitespace-pre-wrap font-mono text-[10px] max-h-32 overflow-y-auto">
+                                    {t.error_log}
+                                  </pre>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </React.Fragment>
+                )) || <TableRow><TableCell colSpan={5} className="text-center py-4">暂无任务</TableCell></TableRow>}
+              </TableBody>
+            </Table>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="commands" className="mt-6">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <div className="space-y-1">
+                <CardTitle className="text-base">命令队列</CardTitle>
+                <CardDescription>下发给 Agent 的指令历史</CardDescription>
+              </div>
+              <Button 
+                variant="outline" 
+                size="icon" 
+                onClick={() => refetchCommands()} 
+                disabled={commandsFetching}
+                className={commandsFetching ? "animate-spin" : ""}
+              >
+                <RefreshCw className="h-4 w-4" />
+              </Button>
+            </CardHeader>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>类型</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead>尝试</TableHead>
+                  <TableHead>创建时间</TableHead>
+                  <TableHead>完成时间</TableHead>
+                  <TableHead>错误信息</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {commands?.map((c) => (
+                  <TableRow key={c.id}>
+                    <TableCell className="font-medium">{COMMAND_TYPE_LABELS[c.type] || c.type}</TableCell>
+                    <TableCell><StatusBadge status={c.status} /></TableCell>
+                    <TableCell>{c.attempts}</TableCell>
+                    <TableCell className="text-xs">{format(new Date(c.created_at), "MM-dd HH:mm:ss", { locale: zhCN })}</TableCell>
+                    <TableCell className="text-xs">{c.completed_at ? format(new Date(c.completed_at), "MM-dd HH:mm:ss", { locale: zhCN }) : "-"}</TableCell>
+                    <TableCell className="text-xs text-red-500 max-w-[150px] truncate" title={c.error_message}>{c.error_message || "-"}</TableCell>
                   </TableRow>
-                )) || <TableRow><TableCell colSpan={4} className="text-center py-4">暂无任务</TableCell></TableRow>}
+                )) || <TableRow><TableCell colSpan={6} className="text-center py-4">暂无命令</TableCell></TableRow>}
               </TableBody>
             </Table>
           </Card>
@@ -184,7 +398,7 @@ export function NodeDetailPage() {
                   agentId={agent.id} 
                   onSelect={(path) => {
                     navigator.clipboard.writeText(path);
-                    alert(`路径已复制: ${path}`);
+                    toast.success(`路径已复制: ${path}`);
                   }} 
                 />
               ) : (
@@ -197,6 +411,53 @@ export function NodeDetailPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={!!selectedSnapshot} onOpenChange={(open) => !open && setSelectedSnapshot(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>恢复快照</DialogTitle>
+            <DialogDescription>
+              将快照 {selectedSnapshot?.id.substring(0, 8)} 恢复到指定路径。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label htmlFor="target-path">恢复目标路径</Label>
+              <Input
+                id="target-path"
+                value={targetPath}
+                onChange={(e) => setTargetPath(e.target.value)}
+                placeholder="/path/to/restore"
+              />
+            </div>
+            <div className="flex items-center space-x-2 bg-amber-50 p-3 rounded border border-amber-200">
+              <Checkbox 
+                id="confirm" 
+                checked={confirmed} 
+                onCheckedChange={(checked) => setConfirmed(checked as boolean)} 
+              />
+              <label
+                htmlFor="confirm"
+                className="text-xs font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-amber-800"
+              >
+                我理解恢复操作可能会覆盖目标路径下的现有文件
+              </label>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSelectedSnapshot(null)}>取消</Button>
+            <Button 
+              disabled={!confirmed || !targetPath || restoreMutation.isPending}
+              onClick={() => restoreMutation.mutate({ 
+                snapshot_id: selectedSnapshot!.id, 
+                target_path: targetPath 
+              })}
+            >
+              {restoreMutation.isPending ? "提交中..." : "确认恢复"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
