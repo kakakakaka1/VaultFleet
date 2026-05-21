@@ -46,12 +46,13 @@ type systemInfo struct {
 	Hostname string `json:"hostname"`
 	OS       string `json:"os"`
 	Arch     string `json:"arch"`
+	Version  string `json:"version,omitempty"`
 }
 
-func Enroll(serverURL, enrollToken, configPath string) (*AgentConfig, error) {
+func Enroll(serverURL, enrollToken, configPath, version string) (*AgentConfig, error) {
 	body, err := json.Marshal(enrollRequest{
 		EnrollToken: enrollToken,
-		SystemInfo:  collectSystemInfo(),
+		SystemInfo:  collectSystemInfo(version),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal enroll request: %w", err)
@@ -113,12 +114,13 @@ func enrollURL(serverURL string) (string, error) {
 	return u.String(), nil
 }
 
-func collectSystemInfo() string {
+func collectSystemInfo(version string) string {
 	hostname, _ := os.Hostname()
 	data, err := json.Marshal(systemInfo{
 		Hostname: hostname,
 		OS:       runtime.GOOS,
 		Arch:     runtime.GOARCH,
+		Version:  version,
 	})
 	if err != nil {
 		return fmt.Sprintf("hostname=%s os=%s arch=%s", hostname, runtime.GOOS, runtime.GOARCH)

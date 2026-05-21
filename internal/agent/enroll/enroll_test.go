@@ -38,7 +38,7 @@ func TestEnroll_SuccessPostsCurrentContractAndSavesConfig(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	configPath := filepath.Join(t.TempDir(), "agent.yaml")
-	cfg, err := Enroll(server.URL, "ek_test123", configPath)
+	cfg, err := Enroll(server.URL, "ek_test123", configPath, "test-version")
 
 	require.NoError(t, err)
 	assert.Equal(t, server.URL, cfg.Server)
@@ -77,7 +77,7 @@ func TestEnroll_JoinsPathWhenServerURLHasTrailingSlash(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	_, err := Enroll(server.URL+"/", "ek_test123", filepath.Join(t.TempDir(), "agent.yaml"))
+	_, err := Enroll(server.URL+"/", "ek_test123", filepath.Join(t.TempDir(), "agent.yaml"), "")
 
 	require.NoError(t, err)
 	assert.Equal(t, "/api/agent/enroll", <-seenPath)
@@ -91,7 +91,7 @@ func TestEnroll_InvalidTokenReturnsStatusAndDoesNotWriteConfig(t *testing.T) {
 	t.Cleanup(server.Close)
 	configPath := filepath.Join(t.TempDir(), "agent.yaml")
 
-	_, err := Enroll(server.URL, "bad-token", configPath)
+	_, err := Enroll(server.URL, "bad-token", configPath, "")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "status 401")
@@ -105,7 +105,7 @@ func TestEnroll_AlreadyUsedTokenReturnsConflict(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	_, err := Enroll(server.URL, "used-token", filepath.Join(t.TempDir(), "agent.yaml"))
+	_, err := Enroll(server.URL, "used-token", filepath.Join(t.TempDir(), "agent.yaml"), "")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "status 409")
@@ -124,7 +124,7 @@ func TestEnroll_ConfigPathPermissions(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	configPath := filepath.Join(t.TempDir(), "vaultfleet", "agent.yaml")
-	_, err := Enroll(server.URL, "ek_test123", configPath)
+	_, err := Enroll(server.URL, "ek_test123", configPath, "")
 
 	require.NoError(t, err)
 	parent, err := os.Stat(filepath.Dir(configPath))
@@ -150,7 +150,7 @@ func TestEnroll_DoesNotChangeExistingParentDirectoryPermissions(t *testing.T) {
 	parentDir := filepath.Join(t.TempDir(), "existing-parent")
 	require.NoError(t, os.Mkdir(parentDir, 0755))
 
-	_, err := Enroll(server.URL, "ek_test123", filepath.Join(parentDir, "agent.yaml"))
+	_, err := Enroll(server.URL, "ek_test123", filepath.Join(parentDir, "agent.yaml"), "")
 
 	require.NoError(t, err)
 	parent, err := os.Stat(parentDir)
@@ -173,7 +173,7 @@ func TestEnroll_RepairsExistingConfigFilePermissions(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "agent.yaml")
 	require.NoError(t, os.WriteFile(configPath, []byte("old: value\n"), 0644))
 
-	_, err := Enroll(server.URL, "ek_test123", configPath)
+	_, err := Enroll(server.URL, "ek_test123", configPath, "")
 
 	require.NoError(t, err)
 	config, err := os.Stat(configPath)
@@ -200,7 +200,7 @@ func TestEnroll_ReplacesExistingBroadPermissionConfigFile(t *testing.T) {
 	before, err := os.Stat(configPath)
 	require.NoError(t, err)
 
-	_, err = Enroll(server.URL, "ek_test123", configPath)
+	_, err = Enroll(server.URL, "ek_test123", configPath, "")
 
 	require.NoError(t, err)
 	after, err := os.Stat(configPath)
@@ -238,7 +238,7 @@ func TestEnroll_BadEnvelopeReturnsErrorAndDoesNotWriteConfig(t *testing.T) {
 			t.Cleanup(server.Close)
 			configPath := filepath.Join(t.TempDir(), "agent.yaml")
 
-			_, err := Enroll(server.URL, "ek_test123", configPath)
+			_, err := Enroll(server.URL, "ek_test123", configPath, "")
 
 			require.Error(t, err)
 			assert.NoFileExists(t, configPath)

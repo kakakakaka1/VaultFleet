@@ -20,6 +20,8 @@ import (
 
 const defaultConfigPath = "/etc/vaultfleet/agent.yaml"
 
+var version string
+
 type AgentConfig struct {
 	Server     string `yaml:"server"`
 	AgentID    string `yaml:"agent_id"`
@@ -116,7 +118,7 @@ func loadConfig(path string) (*AgentConfig, error) {
 }
 
 func enroll(server, token, configPath string) (*AgentConfig, error) {
-	cfg, err := enrollpkg.Enroll(server, token, configPath)
+	cfg, err := enrollpkg.Enroll(server, token, configPath, version)
 	if err != nil {
 		return nil, err
 	}
