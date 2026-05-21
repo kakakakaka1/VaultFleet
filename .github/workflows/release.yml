@@ -72,10 +72,17 @@ jobs:
           cache-to: type=gha,mode=max
 
   release-agent:
-    name: Publish Agent release assets
+    name: Build Agent (${{ matrix.goarch }})
     needs: test
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,15 +93,35 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build Agent binaries
+      - name: Build Agent binary
         run: |
           mkdir -p dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build -ldflags="-s -w" -o dist/vaultfleet-agent-linux-amd64 ./cmd/agent
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-            go build -ldflags="-s -w" -o dist/vaultfleet-agent-linux-arm64 ./cmd/agent
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w" -o dist/vaultfleet-agent-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/agent
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/vaultfleet-agent-*
+
+  publish-agent:
+    name: Publish Agent release assets
+    needs: release-agent
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all agent artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: agent-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
           cd dist
-          sha256sum vaultfleet-agent-linux-* > checksums.txt
+          sha256sum vaultfleet-agent-* > checksums.txt
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
