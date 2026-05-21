@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/pkg/protocol"
 )
@@ -17,8 +19,9 @@ import (
 const snapshotRequestTimeout = 30 * time.Second
 
 type SnapshotHandler struct {
-	DB  *db.Database
-	Hub SnapshotHub
+	DB       *db.Database
+	Hub      SnapshotHub
+	Commands *commands.Service
 
 	timeout     time.Duration
 	sendAndWait func(agentID string, msg protocol.Message, timeout time.Duration) (<-chan protocol.Message, error)
@@ -27,6 +30,19 @@ type SnapshotHandler struct {
 type SnapshotHub interface {
 	IsOnline(agentID string) bool
 	SendAndWait(agentID string, msg protocol.Message, timeout time.Duration) (<-chan protocol.Message, error)
+}
+
+type TaskResultCommandCompleter interface {
+	CompleteTaskResult(ctx context.Context, agentID string, messageID string, result protocol.TaskResultPayload) error
+}
+
+type taskResultCommandCompleterWithApply interface {
+	CompleteTaskResultWith(ctx context.Context, agentID string, messageID string, result protocol.TaskResultPayload, apply func(*gorm.DB) error) (bool, error)
+}
+
+type SnapshotListCommandCompleter interface {
+	CompleteSnapshotListWith(ctx context.Context, agentID string, messageID string, result protocol.SnapshotListRespPayload, apply func(*gorm.DB) error) (bool, error)
+	FailCommandOfType(ctx context.Context, agentID string, messageID string, commandType string, errorText string) error
 }
 
 type snapshotResponse struct {
@@ -77,8 +93,9 @@ func (h *SnapshotHandler) RefreshSnapshots(c *gin.Context) {
 	if !agentExistsByID(c, h.DB, agentID) {
 		return
 	}
-	if h.Hub == nil || !h.Hub.IsOnline(agentID) {
-		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
+	commandService := h.Commands
+	if commandService == nil {
+		writeErrorResponse(c, http.StatusInternalServerError, "command service not configured")
 		return
 	}
 
@@ -87,53 +104,117 @@ func (h *SnapshotHandler) RefreshSnapshots(c *gin.Context) {
 		writeErrorResponse(c, http.StatusInternalServerError, "encode snapshot list request")
 		return
 	}
+	command, err := commandService.CreateCommand(contextFromGin(c), commands.CreateCommandInput{
+		AgentID: agentID,
+		Type:    protocol.TypeSnapshotListReq,
+		Message: *msg,
+	})
+	if err != nil {
+		writeErrorResponse(c, http.StatusInternalServerError, "database error")
+		return
+	}
+	if h.Hub == nil || !h.Hub.IsOnline(agentID) {
+		writeDataResponse(c, http.StatusAccepted, gin.H{
+			"command_id": command.ID,
+			"message_id": msg.ID,
+		})
+		return
+	}
 
 	wait := h.sendAndWait
 	if wait == nil && h.Hub != nil {
 		wait = h.Hub.SendAndWait
 	}
 	if wait == nil {
-		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
+		writeDataResponse(c, http.StatusAccepted, gin.H{
+			"command_id": command.ID,
+			"message_id": msg.ID,
+		})
 		return
 	}
 
 	respCh, err := wait(agentID, *msg, h.timeout)
 	if err != nil {
-		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
+		_ = commandService.RecordDispatchFailure(context.Background(), command.ID, err)
+		writeDataResponse(c, http.StatusAccepted, gin.H{
+			"command_id": command.ID,
+			"message_id": msg.ID,
+		})
+		return
+	}
+	if err := commandService.RecordDispatchSuccess(context.Background(), command.ID); err != nil {
+		writeErrorResponse(c, http.StatusInternalServerError, "database error")
 		return
 	}
 
 	select {
 	case resp, ok := <-respCh:
-		if !ok {
-			writeErrorResponse(c, http.StatusGatewayTimeout, "timeout waiting for agent response")
-			return
-		}
-		if resp.Type != protocol.TypeSnapshotListResp {
-			writeErrorResponse(c, http.StatusBadGateway, "invalid agent response")
-			return
-		}
-		payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&resp)
-		if err != nil {
-			writeErrorResponse(c, http.StatusBadGateway, "invalid agent response")
-			return
-		}
-		if payload.Error != "" {
-			writeErrorResponse(c, http.StatusBadGateway, payload.Error)
-			return
-		}
-		if err := upsertSnapshots(h.DB, agentID, payload.Snapshots); err != nil {
-			writeErrorResponse(c, http.StatusInternalServerError, "database error")
-			return
-		}
-		snapshots, ok := h.loadSnapshotResponses(c, agentID)
-		if !ok {
-			return
-		}
-		writeDataResponse(c, http.StatusOK, snapshotRefreshResponse{Count: len(payload.Snapshots), Snapshots: snapshots})
+		h.writeSnapshotRefreshResponse(c, commandService, agentID, msg.ID, resp, ok)
+		return
+	default:
+	}
+
+	select {
+	case resp, ok := <-respCh:
+		h.writeSnapshotRefreshResponse(c, commandService, agentID, msg.ID, resp, ok)
 	case <-c.Request.Context().Done():
+		go h.drainSnapshotRefreshResponse(respCh, commandService, agentID, msg.ID)
 		writeErrorResponse(c, http.StatusGatewayTimeout, "request cancelled")
 	}
+}
+
+func (h *SnapshotHandler) writeSnapshotRefreshResponse(c *gin.Context, commandService *commands.Service, agentID string, messageID string, resp protocol.Message, ok bool) {
+	if !ok {
+		_ = commandService.TimeoutCommand(context.Background(), agentID, messageID)
+		writeErrorResponse(c, http.StatusGatewayTimeout, "timeout waiting for agent response")
+		return
+	}
+	payload, status, message := h.completeSnapshotRefreshResponse(context.Background(), commandService, agentID, messageID, resp)
+	if status != http.StatusOK {
+		writeErrorResponse(c, status, message)
+		return
+	}
+	snapshots, loaded := h.loadSnapshotResponses(c, agentID)
+	if !loaded {
+		return
+	}
+	writeDataResponse(c, http.StatusOK, snapshotRefreshResponse{Count: len(payload.Snapshots), Snapshots: snapshots})
+}
+
+func (h *SnapshotHandler) drainSnapshotRefreshResponse(respCh <-chan protocol.Message, commandService *commands.Service, agentID string, messageID string) {
+	resp, ok := <-respCh
+	if !ok {
+		_ = commandService.TimeoutCommand(context.Background(), agentID, messageID)
+		return
+	}
+	_, _, _ = h.completeSnapshotRefreshResponse(context.Background(), commandService, agentID, messageID, resp)
+}
+
+func (h *SnapshotHandler) completeSnapshotRefreshResponse(ctx context.Context, commandService *commands.Service, agentID string, messageID string, resp protocol.Message) (*protocol.SnapshotListRespPayload, int, string) {
+	if resp.Type != protocol.TypeSnapshotListResp {
+		_ = commandService.FailCommandOfType(ctx, agentID, messageID, protocol.TypeSnapshotListReq, "invalid agent response")
+		return nil, http.StatusBadGateway, "invalid agent response"
+	}
+	payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&resp)
+	if err != nil {
+		_ = commandService.FailCommandOfType(ctx, agentID, messageID, protocol.TypeSnapshotListReq, "invalid agent response")
+		return nil, http.StatusBadGateway, "invalid agent response"
+	}
+	if payload.Error != "" {
+		_ = commandService.FailCommandOfType(ctx, agentID, messageID, protocol.TypeSnapshotListReq, payload.Error)
+		return nil, http.StatusBadGateway, payload.Error
+	}
+	completed, err := commandService.CompleteSnapshotListWith(ctx, agentID, messageID, *payload, func(tx *gorm.DB) error {
+		return upsertSnapshotsDB(tx, agentID, payload.Snapshots)
+	})
+	if err != nil {
+		_ = commandService.FailCommandOfType(ctx, agentID, messageID, protocol.TypeSnapshotListReq, "database error")
+		return nil, http.StatusInternalServerError, "database error"
+	}
+	if !completed {
+		return nil, http.StatusGatewayTimeout, "command is no longer active"
+	}
+	return payload, http.StatusOK, ""
 }
 
 func (h *SnapshotHandler) loadSnapshotResponses(c *gin.Context, agentID string) ([]snapshotResponse, bool) {
@@ -171,14 +252,120 @@ func newSnapshotResponse(snapshot db.Snapshot) (snapshotResponse, error) {
 	}, nil
 }
 
-func NewTaskResultProcessor(database *db.Database) func(agentID string, msg protocol.Message) error {
+func NewTaskResultProcessor(database *db.Database, completer ...TaskResultCommandCompleter) func(agentID string, msg protocol.Message) error {
 	return func(agentID string, msg protocol.Message) error {
 		result, err := protocol.ParsePayload[protocol.TaskResultPayload](&msg)
 		if err != nil {
 			return err
 		}
+		if len(completer) > 0 && completer[0] != nil {
+			if withApply, ok := completer[0].(taskResultCommandCompleterWithApply); ok {
+				completed, err := withApply.CompleteTaskResultWith(context.Background(), agentID, msg.ID, *result, func(tx *gorm.DB) error {
+					return upsertCommandLinkedBackupSnapshotsDB(tx, agentID, msg.ID, *result)
+				})
+				if err != nil {
+					return err
+				}
+				if completed || commandExistsByMessage(database, agentID, msg.ID) {
+					return nil
+				}
+			} else if err := completer[0].CompleteTaskResult(context.Background(), agentID, msg.ID, *result); err != nil {
+				return err
+			} else if commandExistsByMessage(database, agentID, msg.ID) {
+				return nil
+			}
+		}
 		return recordTaskResult(database, agentID, msg.ID, *result)
 	}
+}
+
+func commandExistsByMessage(database *db.Database, agentID string, messageID string) bool {
+	if database == nil || database.DB == nil || messageID == "" {
+		return false
+	}
+	query := database.DB.Model(&db.AgentCommand{}).Where("message_id = ?", messageID)
+	if agentID != "" {
+		query = query.Where("agent_id = ?", agentID)
+	}
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return false
+	}
+	return count > 0
+}
+
+func NewSnapshotListResponseProcessor(database *db.Database, completer SnapshotListCommandCompleter) func(agentID string, msg protocol.Message) error {
+	return func(agentID string, msg protocol.Message) error {
+		payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&msg)
+		if err != nil {
+			return err
+		}
+		if payload.Error != "" {
+			if completer == nil {
+				return nil
+			}
+			return completer.FailCommandOfType(context.Background(), agentID, msg.ID, protocol.TypeSnapshotListReq, payload.Error)
+		}
+		if completer == nil {
+			return upsertSnapshots(database, agentID, payload.Snapshots)
+		}
+		_, err = completer.CompleteSnapshotListWith(context.Background(), agentID, msg.ID, *payload, func(tx *gorm.DB) error {
+			return upsertSnapshotsDB(tx, agentID, payload.Snapshots)
+		})
+		if err != nil {
+			_ = completer.FailCommandOfType(context.Background(), agentID, msg.ID, protocol.TypeSnapshotListReq, "database error")
+			return err
+		}
+		return nil
+	}
+}
+
+func upsertCommandLinkedBackupSnapshots(database *db.Database, agentID string, messageID string, result protocol.TaskResultPayload) error {
+	if result.TaskType != "backup" || result.Status != "success" || len(result.Snapshots) == 0 || messageID == "" {
+		return nil
+	}
+	if database == nil || database.DB == nil {
+		return errors.New("database not configured")
+	}
+	if agentID == "" {
+		agentID = result.AgentID
+	}
+	linked, err := commandLinkedTaskHistoryExists(database.DB, agentID, messageID)
+	if err != nil || !linked {
+		return err
+	}
+	return upsertSnapshotsDB(database.DB, agentID, result.Snapshots)
+}
+
+func upsertCommandLinkedBackupSnapshotsDB(gormDB *gorm.DB, agentID string, messageID string, result protocol.TaskResultPayload) error {
+	if result.TaskType != "backup" || result.Status != "success" || len(result.Snapshots) == 0 || messageID == "" {
+		return nil
+	}
+	if gormDB == nil {
+		return errors.New("database not configured")
+	}
+	if agentID == "" {
+		agentID = result.AgentID
+	}
+	linked, err := commandLinkedTaskHistoryExists(gormDB, agentID, messageID)
+	if err != nil || !linked {
+		return err
+	}
+	return upsertSnapshotsDB(gormDB, agentID, result.Snapshots)
+}
+
+func commandLinkedTaskHistoryExists(gormDB *gorm.DB, agentID string, messageID string) (bool, error) {
+	var history db.TaskHistory
+	err := gormDB.
+		Where("agent_id = ? AND message_id = ? AND command_id <> ?", agentID, messageID, "").
+		First(&history).Error
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	return false, err
 }
 
 func recordTaskResult(database *db.Database, agentID string, messageID string, result protocol.TaskResultPayload) error {
@@ -187,6 +374,15 @@ func recordTaskResult(database *db.Database, agentID string, messageID string, r
 	}
 	if agentID == "" {
 		agentID = result.AgentID
+	}
+	if messageID != "" {
+		linked, err := commandLinkedTaskHistoryExists(database.DB, agentID, messageID)
+		if err != nil {
+			return err
+		}
+		if linked {
+			return nil
+		}
 	}
 	if result.TaskType == "restore" {
 		return completeRestoreTaskResult(database, agentID, messageID, result)

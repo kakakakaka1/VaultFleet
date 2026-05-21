@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/pkg/protocol"
 )
@@ -26,6 +27,7 @@ func TestBackupNowSendsAgentCommand(t *testing.T) {
 	assert.Equal(t, true, body["ok"])
 	data := requireMap(t, body["data"])
 	assert.NotEmpty(t, data["message_id"])
+	assert.NotEmpty(t, data["command_id"])
 	require.Len(t, setup.hub.sent, 1)
 	assert.Equal(t, agent.ID, setup.hub.sent[0].agentID)
 	assert.Equal(t, protocol.TypeBackupNow, setup.hub.sent[0].message.Type)
@@ -33,18 +35,55 @@ func TestBackupNowSendsAgentCommand(t *testing.T) {
 	payload, err := protocol.ParsePayload[protocol.BackupNowPayload](&setup.hub.sent[0].message)
 	require.NoError(t, err)
 	assert.Equal(t, agent.ID, payload.AgentID)
+
+	var command db.AgentCommand
+	require.NoError(t, setup.database.DB.First(&command, "id = ?", data["command_id"]).Error)
+	assert.Equal(t, agent.ID, command.AgentID)
+	assert.Equal(t, protocol.TypeBackupNow, command.Type)
+	assert.Equal(t, commands.CommandStatusRunning, command.Status)
+	assert.Equal(t, data["message_id"], command.MessageID)
+	assert.Equal(t, 1, command.Attempts)
+	assert.NotNil(t, command.DispatchedAt)
+
+	var history db.TaskHistory
+	require.NoError(t, setup.database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, agent.ID, history.AgentID)
+	assert.Equal(t, "backup", history.Type)
+	assert.Equal(t, commands.TaskStatusRunning, history.Status)
+	assert.Equal(t, command.ID, history.CommandID)
+	assert.Equal(t, data["message_id"], history.MessageID)
 }
 
-func TestBackupNowRejectsOfflineAgent(t *testing.T) {
+func TestBackupNowQueuesOfflineAgentCommand(t *testing.T) {
 	setup := setupTasksAPI(t)
 	agent := createTasksTestAgent(t, setup.database, "offline")
 
 	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/backup-now", map[string]any{})
 
-	require.Equal(t, http.StatusBadGateway, w.Code)
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
 	body := parseJSON(t, w)
-	assert.Equal(t, false, body["ok"])
-	assert.Equal(t, "agent offline", body["error"])
+	assert.Equal(t, true, body["ok"])
+	data := requireMap(t, body["data"])
+	assert.NotEmpty(t, data["message_id"])
+	assert.NotEmpty(t, data["command_id"])
+	assert.Empty(t, setup.hub.sent)
+
+	var command db.AgentCommand
+	require.NoError(t, setup.database.DB.First(&command, "id = ?", data["command_id"]).Error)
+	assert.Equal(t, agent.ID, command.AgentID)
+	assert.Equal(t, protocol.TypeBackupNow, command.Type)
+	assert.Equal(t, commands.CommandStatusPending, command.Status)
+	assert.Equal(t, data["message_id"], command.MessageID)
+	assert.Equal(t, 0, command.Attempts)
+	assert.Nil(t, command.DispatchedAt)
+
+	var history db.TaskHistory
+	require.NoError(t, setup.database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, agent.ID, history.AgentID)
+	assert.Equal(t, "backup", history.Type)
+	assert.Equal(t, commands.TaskStatusPending, history.Status)
+	assert.Equal(t, command.ID, history.CommandID)
+	assert.Equal(t, data["message_id"], history.MessageID)
 }
 
 func TestListTasksFiltersAndLimitsHistory(t *testing.T) {
@@ -53,7 +92,7 @@ func TestListTasksFiltersAndLimitsHistory(t *testing.T) {
 	agentB := createTasksTestAgent(t, setup.database, "online")
 	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
 	seedTaskHistory(t, setup.database, agentA.ID, "backup", "success", "snap-a-old", now.Add(-2*time.Hour))
-	seedTaskHistory(t, setup.database, agentA.ID, "backup", "failed", "snap-a-new", now)
+	expected := seedTaskHistory(t, setup.database, agentA.ID, "backup", "failed", "snap-a-new", now)
 	seedTaskHistory(t, setup.database, agentA.ID, "restore", "success", "snap-restore", now.Add(-time.Hour))
 	seedTaskHistory(t, setup.database, agentB.ID, "backup", "success", "snap-b", now.Add(time.Hour))
 
@@ -69,6 +108,10 @@ func TestListTasksFiltersAndLimitsHistory(t *testing.T) {
 	assert.Equal(t, agentA.ID, task["agent_id"])
 	assert.Equal(t, "backup", task["type"])
 	assert.Equal(t, "snap-a-new", task["snapshot_id"])
+	assert.Equal(t, expected.CommandID, task["command_id"])
+	assert.Equal(t, expected.PolicyID, task["policy_id"])
+	assert.Equal(t, expected.StorageID, task["storage_id"])
+	assert.NotEmpty(t, task["updated_at"])
 }
 
 type tasksAPISetup struct {
@@ -86,7 +129,9 @@ func setupTasksAPI(t *testing.T) tasksAPISetup {
 	require.NoError(t, err)
 
 	hub := &fakeCommandHub{online: map[string]bool{}}
+	commandService := commands.NewService(database, hub)
 	handler := NewTaskHandler(database, hub)
+	handler.Commands = commandService
 	router := gin.New()
 	RegisterTaskRoutes(router.Group("/api"), handler)
 
@@ -128,7 +173,7 @@ func createTasksTestAgent(t *testing.T, database *db.Database, status string) db
 	return agent
 }
 
-func seedTaskHistory(t *testing.T, database *db.Database, agentID string, taskType string, status string, snapshotID string, createdAt time.Time) {
+func seedTaskHistory(t *testing.T, database *db.Database, agentID string, taskType string, status string, snapshotID string, createdAt time.Time) db.TaskHistory {
 	t.Helper()
 
 	startedAt := createdAt.Add(-time.Minute)
@@ -138,10 +183,14 @@ func seedTaskHistory(t *testing.T, database *db.Database, agentID string, taskTy
 		Type:       taskType,
 		Status:     status,
 		SnapshotID: snapshotID,
+		CommandID:  "cmd-" + snapshotID,
+		PolicyID:   "policy-" + snapshotID,
+		StorageID:  "storage-" + snapshotID,
 		StartedAt:  &startedAt,
 		FinishedAt: &finishedAt,
 		DurationMs: 60000,
 		CreatedAt:  createdAt,
 	}
 	require.NoError(t, database.DB.Create(&history).Error)
+	return history
 }

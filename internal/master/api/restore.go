@@ -2,17 +2,18 @@ package api
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/pkg/protocol"
 )
 
 type RestoreHandler struct {
-	DB  *db.Database
-	Hub RestoreHub
+	DB       *db.Database
+	Hub      RestoreHub
+	Commands *commands.Service
 }
 
 type RestoreHub interface {
@@ -53,10 +54,6 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 		writeErrorResponse(c, http.StatusBadRequest, "invalid request")
 		return
 	}
-	if h.Hub == nil || !h.Hub.IsOnline(agentID) {
-		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
-		return
-	}
 
 	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
 		SnapshotID: request.SnapshotID,
@@ -67,38 +64,46 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 		return
 	}
 
-	startedAt := time.Now()
-	history := db.TaskHistory{
+	commandService := h.commandService()
+	command, err := commandService.CreateCommand(contextFromGin(c), commands.CreateCommandInput{
 		AgentID:    agentID,
-		Type:       "restore",
-		Status:     "running",
+		Type:       protocol.TypeRestoreReq,
+		Message:    *msg,
+		TaskType:   "restore",
+		TaskState:  commands.TaskStatusPending,
 		SnapshotID: request.SnapshotID,
-		MessageID:  msg.ID,
-		StartedAt:  &startedAt,
-	}
-	if err := h.DB.DB.Create(&history).Error; err != nil {
+	})
+	if err != nil {
 		writeErrorResponse(c, http.StatusInternalServerError, "database error")
 		return
 	}
 
-	if err := h.Hub.Send(agentID, *msg); err != nil {
-		finishedAt := time.Now()
-		updates := map[string]interface{}{
-			"status":      "failed",
-			"finished_at": &finishedAt,
-			"duration_ms": finishedAt.Sub(startedAt).Milliseconds(),
-			"error_log":   err.Error(),
-		}
-		if updateErr := h.DB.DB.Model(&history).Updates(updates).Error; updateErr != nil {
+	responseMessage := "restore queued"
+	if h.Hub != nil && h.Hub.IsOnline(agentID) {
+		if err := commandService.DispatchNewPendingForAgent(contextFromGin(c), agentID, 100); err != nil {
 			writeErrorResponse(c, http.StatusInternalServerError, "database error")
 			return
 		}
-		writeErrorResponse(c, http.StatusBadGateway, "agent offline")
-		return
+		var dispatchedCommand db.AgentCommand
+		if err := h.DB.DB.WithContext(contextFromGin(c)).First(&dispatchedCommand, "id = ?", command.ID).Error; err != nil {
+			writeErrorResponse(c, http.StatusInternalServerError, "database error")
+			return
+		}
+		if dispatchedCommand.Status == commands.CommandStatusRunning {
+			responseMessage = "restore started"
+		}
 	}
 
 	writeDataResponse(c, http.StatusAccepted, gin.H{
-		"message":    "restore started",
+		"message":    responseMessage,
+		"command_id": command.ID,
 		"message_id": msg.ID,
 	})
+}
+
+func (h *RestoreHandler) commandService() *commands.Service {
+	if h.Commands != nil {
+		return h.Commands
+	}
+	return commands.NewService(h.DB, h.Hub)
 }

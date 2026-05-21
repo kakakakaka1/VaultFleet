@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/pkg/protocol"
 )
@@ -40,7 +41,7 @@ func TestRestoreValidation(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestRestoreOffline(t *testing.T) {
+func TestRestoreOfflineQueuesCommandAndTask(t *testing.T) {
 	setup := setupRestoreAPI(t)
 	agent := createRestoreTestAgent(t, setup.database, "offline")
 
@@ -49,10 +50,33 @@ func TestRestoreOffline(t *testing.T) {
 		"target_path": "/restore",
 	})
 
-	require.Equal(t, http.StatusBadGateway, w.Code)
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
 	body := parseJSON(t, w)
-	assert.Equal(t, false, body["ok"])
-	assert.Equal(t, "agent offline", body["error"])
+	assert.Equal(t, true, body["ok"])
+	assert.Equal(t, "restore queued", body["message"])
+	data := requireMap(t, body["data"])
+	assert.Equal(t, "restore queued", data["message"])
+	assert.NotEmpty(t, data["command_id"])
+	assert.NotEmpty(t, data["message_id"])
+	assert.Empty(t, setup.hub.sent)
+
+	var command db.AgentCommand
+	require.NoError(t, setup.database.DB.First(&command, "id = ?", data["command_id"]).Error)
+	assert.Equal(t, agent.ID, command.AgentID)
+	assert.Equal(t, protocol.TypeRestoreReq, command.Type)
+	assert.Equal(t, commands.CommandStatusPending, command.Status)
+	assert.Equal(t, data["message_id"], command.MessageID)
+	assert.Equal(t, 0, command.Attempts)
+	assert.Nil(t, command.DispatchedAt)
+
+	var history db.TaskHistory
+	require.NoError(t, setup.database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, agent.ID, history.AgentID)
+	assert.Equal(t, "restore", history.Type)
+	assert.Equal(t, commands.TaskStatusPending, history.Status)
+	assert.Equal(t, "snap-1", history.SnapshotID)
+	assert.Equal(t, command.ID, history.CommandID)
+	assert.Equal(t, data["message_id"], history.MessageID)
 }
 
 func TestRestoreSendsMessageAndRecordsRunningTask(t *testing.T) {
@@ -71,6 +95,7 @@ func TestRestoreSendsMessageAndRecordsRunningTask(t *testing.T) {
 	assert.Equal(t, "restore started", body["message"])
 	data := requireMap(t, body["data"])
 	assert.Equal(t, "restore started", data["message"])
+	assert.NotEmpty(t, data["command_id"])
 	messageID, ok := body["message_id"].(string)
 	require.True(t, ok)
 	assert.Equal(t, messageID, data["message_id"])
@@ -86,12 +111,23 @@ func TestRestoreSendsMessageAndRecordsRunningTask(t *testing.T) {
 	assert.Equal(t, "snap-1", payload.SnapshotID)
 	assert.Equal(t, "/restore/target", payload.Target)
 
+	var command db.AgentCommand
+	require.NoError(t, setup.database.DB.First(&command, "id = ?", data["command_id"]).Error)
+	assert.Equal(t, agent.ID, command.AgentID)
+	assert.Equal(t, protocol.TypeRestoreReq, command.Type)
+	assert.Equal(t, commands.CommandStatusRunning, command.Status)
+	assert.Equal(t, messageID, command.MessageID)
+	assert.Equal(t, 1, command.Attempts)
+	assert.NotNil(t, command.DispatchedAt)
+
 	var history db.TaskHistory
-	require.NoError(t, setup.database.DB.First(&history, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-1").Error)
+	require.NoError(t, setup.database.DB.First(&history, "command_id = ?", command.ID).Error)
 	assert.Equal(t, "restore", history.Type)
-	assert.Equal(t, "running", history.Status)
+	assert.Equal(t, commands.TaskStatusRunning, history.Status)
 	assert.Equal(t, messageID, history.MessageID)
-	assert.NotNil(t, history.StartedAt)
+	assert.Equal(t, "snap-1", history.SnapshotID)
+	assert.Equal(t, command.ID, history.CommandID)
+	assert.Nil(t, history.StartedAt)
 	assert.Nil(t, history.FinishedAt)
 }
 
@@ -112,7 +148,7 @@ func TestRestoreAcceptsAcceptanceTargetAlias(t *testing.T) {
 	assert.Equal(t, "/opt/vaultfleet-restore", payload.Target)
 }
 
-func TestRestoreRecordsRunningTaskBeforeSendingMessage(t *testing.T) {
+func TestRestoreRecordsPendingCommandAndTaskBeforeSendingMessage(t *testing.T) {
 	setup := setupRestoreAPI(t)
 	agent := createRestoreTestAgent(t, setup.database, "online")
 	setup.hub.online[agent.ID] = true
@@ -120,7 +156,14 @@ func TestRestoreRecordsRunningTaskBeforeSendingMessage(t *testing.T) {
 		var history db.TaskHistory
 		require.NoError(t, setup.database.DB.First(&history, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-1").Error)
 		assert.Equal(t, "restore", history.Type)
-		assert.Equal(t, "running", history.Status)
+		assert.Equal(t, commands.TaskStatusRunning, history.Status)
+
+		var command db.AgentCommand
+		require.NoError(t, setup.database.DB.First(&command, "id = ?", history.CommandID).Error)
+		assert.Equal(t, protocol.TypeRestoreReq, command.Type)
+		assert.Equal(t, commands.CommandStatusRunning, command.Status)
+		assert.Equal(t, 1, command.Attempts)
+		assert.NotNil(t, command.DispatchedAt)
 	}
 
 	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/restore", map[string]any{
@@ -132,7 +175,7 @@ func TestRestoreRecordsRunningTaskBeforeSendingMessage(t *testing.T) {
 	require.True(t, setup.hub.beforeSendCalled)
 }
 
-func TestRestoreSendFailureMarksTaskFailed(t *testing.T) {
+func TestRestoreSendFailureLeavesCommandQueued(t *testing.T) {
 	setup := setupRestoreAPI(t)
 	agent := createRestoreTestAgent(t, setup.database, "online")
 	setup.hub.online[agent.ID] = true
@@ -143,14 +186,27 @@ func TestRestoreSendFailureMarksTaskFailed(t *testing.T) {
 		"target_path": "/restore/target",
 	})
 
-	require.Equal(t, http.StatusBadGateway, w.Code)
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	assert.Equal(t, true, body["ok"])
+	assert.Equal(t, "restore queued", body["message"])
+	data := requireMap(t, body["data"])
+	assert.Equal(t, "restore queued", data["message"])
+
+	var command db.AgentCommand
+	require.NoError(t, setup.database.DB.First(&command, "id = ?", data["command_id"]).Error)
+	assert.Equal(t, commands.CommandStatusPending, command.Status)
+	assert.Equal(t, 1, command.Attempts)
+	assert.Nil(t, command.DispatchedAt)
+	assert.Contains(t, command.ErrorMessage, "websocket write failed")
+
 	var history db.TaskHistory
-	require.NoError(t, setup.database.DB.First(&history, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-1").Error)
+	require.NoError(t, setup.database.DB.First(&history, "command_id = ?", command.ID).Error)
 	assert.Equal(t, "restore", history.Type)
-	assert.Equal(t, "failed", history.Status)
-	assert.NotNil(t, history.StartedAt)
-	assert.NotNil(t, history.FinishedAt)
-	assert.Contains(t, history.ErrorLog, "websocket write failed")
+	assert.Equal(t, commands.TaskStatusPending, history.Status)
+	assert.Nil(t, history.StartedAt)
+	assert.Nil(t, history.FinishedAt)
+	assert.Empty(t, history.ErrorLog)
 }
 
 type restoreAPISetup struct {
@@ -168,7 +224,9 @@ func setupRestoreAPI(t *testing.T) restoreAPISetup {
 	require.NoError(t, err)
 
 	hub := &fakeRestoreHub{online: map[string]bool{}}
+	commandService := commands.NewService(database, hub)
 	handler := NewRestoreHandler(database, hub)
+	handler.Commands = commandService
 	router := gin.New()
 	RegisterRestoreRoutes(router.Group("/api"), handler)
 

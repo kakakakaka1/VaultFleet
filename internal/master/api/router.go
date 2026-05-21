@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,8 +11,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
+	"vaultfleet/internal/master/storagecheck"
 	"vaultfleet/pkg/protocol"
 )
 
@@ -20,11 +23,13 @@ type RouterHub interface {
 	SnapshotHub
 	RestoreHub
 	CommandHub
+	AgentStatusProvider
 }
 
 type RouterConfig struct {
 	Database       *db.Database
 	Hub            RouterHub
+	CommandService *commands.Service
 	EventBus       *events.Bus
 	AgentWebSocket gin.HandlerFunc
 }
@@ -38,6 +43,18 @@ type trackedPolicyPush struct {
 	AgentID   string
 	PolicyID  string
 	UpdatedAt time.Time
+}
+
+type CurrentPolicyCommand struct {
+	Message         *protocol.Message
+	AgentID         string
+	PolicyID        string
+	StorageID       string
+	PolicyUpdatedAt time.Time
+}
+
+type PolicyCommandCompleter interface {
+	CompletePolicyAck(ctx context.Context, agentID string, messageID string, success bool, errorText string) error
 }
 
 func NewPolicyPushTracker() *PolicyPushTracker {
@@ -97,6 +114,14 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
+	commandService := cfg.CommandService
+	if commandService == nil {
+		commandService = commands.NewService(cfg.Database, cfg.Hub)
+	}
+	if commandService != nil && commandService.Hub == nil {
+		commandService.Hub = cfg.Hub
+	}
+
 	authHandler := NewAuthHandler(cfg.Database)
 	agentHandler := NewAgentHandler(cfg.Database)
 	storageHandler := NewConfigHandler(cfg.Database)
@@ -104,10 +129,15 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	policyHandler := NewPolicyHandler(cfg.Database, cfg.EventBus)
 	browseHandler := NewBrowseHandler(cfg.Database, cfg.Hub)
 	snapshotHandler := NewSnapshotHandler(cfg.Database, cfg.Hub)
+	snapshotHandler.Commands = commandService
 	restoreHandler := NewRestoreHandler(cfg.Database, cfg.Hub)
+	restoreHandler.Commands = commandService
 	taskHandler := NewTaskHandler(cfg.Database, cfg.Hub)
+	taskHandler.Commands = commandService
+	commandHandler := NewCommandHandler(cfg.Database)
 	notificationHandler := NewNotificationHandler(cfg.Database)
 	systemHandler := NewSystemHandler(cfg.Database)
+	healthHandler := NewHealthHandler(cfg.Database, cfg.Hub)
 
 	public := r.Group("/api")
 	public.GET("/auth/check", authHandler.CheckInit)
@@ -134,10 +164,12 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	RegisterSnapshotRoutes(protected, snapshotHandler)
 	RegisterRestoreRoutes(protected, restoreHandler)
 	RegisterTaskRoutes(protected, taskHandler)
+	RegisterCommandRoutes(protected, commandHandler)
 	RegisterNotificationRoutes(protected, notificationHandler)
 	RegisterSystemRoutes(protected.Group("/system"), systemHandler)
 
 	RegisterDownloadRoutes(r, cfg.Database.DataDir)
+	RegisterHealthRoutes(r, healthHandler)
 	RegisterFrontendRoutes(r)
 
 	return r
@@ -159,6 +191,24 @@ func CurrentPolicyLookup(database *db.Database) func(agentID string) (*protocol.
 
 func CurrentPolicyLookupWithTracker(database *db.Database, tracker *PolicyPushTracker) func(agentID string) (*protocol.Message, bool) {
 	return func(agentID string) (*protocol.Message, bool) {
+		command, ok := CurrentPolicyCommandLookupWithTracker(database, tracker)(agentID)
+		if !ok || command == nil {
+			return nil, false
+		}
+		return command.Message, true
+	}
+}
+
+func CurrentPolicyCommandLookup(database *db.Database) func(agentID string) (*CurrentPolicyCommand, bool) {
+	return CurrentPolicyCommandLookupWithTracker(database, defaultPolicyPushTracker)
+}
+
+func CurrentPolicyCommandLookupWithTracker(database *db.Database, tracker *PolicyPushTracker) func(agentID string) (*CurrentPolicyCommand, bool) {
+	return func(agentID string) (*CurrentPolicyCommand, bool) {
+		if database == nil || database.DB == nil {
+			return nil, false
+		}
+
 		var policy db.BackupPolicy
 		if err := database.DB.
 			Where("agent_id = ? AND synced = ?", agentID, false).
@@ -182,15 +232,21 @@ func CurrentPolicyLookupWithTracker(database *db.Database, tracker *PolicyPushTr
 			return nil, false
 		}
 		tracker.Track(msg.ID, policy.AgentID, policy.ID, policy.UpdatedAt)
-		return msg, true
+		return &CurrentPolicyCommand{
+			Message:         msg,
+			AgentID:         policy.AgentID,
+			PolicyID:        policy.ID,
+			StorageID:       storage.ID,
+			PolicyUpdatedAt: policy.UpdatedAt,
+		}, true
 	}
 }
 
-func NewPolicyAckProcessor(database *db.Database) func(agentID string, msg protocol.Message) error {
-	return NewPolicyAckProcessorWithTracker(database, defaultPolicyPushTracker)
+func NewPolicyAckProcessor(database *db.Database, completer ...PolicyCommandCompleter) func(agentID string, msg protocol.Message) error {
+	return NewPolicyAckProcessorWithTracker(database, defaultPolicyPushTracker, completer...)
 }
 
-func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPushTracker) func(agentID string, msg protocol.Message) error {
+func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPushTracker, completer ...PolicyCommandCompleter) func(agentID string, msg protocol.Message) error {
 	return func(agentID string, msg protocol.Message) error {
 		ack, err := protocol.ParsePayload[protocol.PolicyAckPayload](&msg)
 		if err != nil {
@@ -198,10 +254,18 @@ func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPush
 		}
 		tracked, ok := tracker.Get(msg.ID, agentID)
 		if !ok {
-			return nil
+			tracked, ok = durableTrackedPolicyPush(database, agentID, msg.ID)
+		}
+		var completerErr error
+		if len(completer) > 0 && completer[0] != nil {
+			completerErr = completer[0].CompletePolicyAck(context.Background(), agentID, msg.ID, ack.Success, ack.Error)
+		}
+		if !ok {
+			return completerErr
 		}
 		if !ack.Success {
-			return nil
+			tracker.Delete(msg.ID)
+			return completerErr
 		}
 
 		err = database.DB.Model(&db.BackupPolicy{}).
@@ -209,9 +273,31 @@ func NewPolicyAckProcessorWithTracker(database *db.Database, tracker *PolicyPush
 			Update("synced", true).Error
 		if err == nil {
 			tracker.Delete(msg.ID)
+			return completerErr
 		}
 		return err
 	}
+}
+
+func durableTrackedPolicyPush(database *db.Database, agentID string, messageID string) (trackedPolicyPush, bool) {
+	if database == nil || database.DB == nil || agentID == "" || messageID == "" {
+		return trackedPolicyPush{}, false
+	}
+	var command db.AgentCommand
+	if err := database.DB.First(&command, "agent_id = ? AND message_id = ? AND type = ?", agentID, messageID, protocol.TypePolicyPush).Error; err != nil {
+		return trackedPolicyPush{}, false
+	}
+	if command.Status != commands.CommandStatusPending && command.Status != commands.CommandStatusDispatched && command.Status != commands.CommandStatusRunning {
+		return trackedPolicyPush{}, false
+	}
+	if command.PolicyID == "" || command.PolicyUpdatedAt == nil {
+		return trackedPolicyPush{}, false
+	}
+	return trackedPolicyPush{
+		AgentID:   command.AgentID,
+		PolicyID:  command.PolicyID,
+		UpdatedAt: *command.PolicyUpdatedAt,
+	}, true
 }
 
 func unavailableAgentWebSocket(database *db.Database) gin.HandlerFunc {
@@ -302,11 +388,11 @@ func policyRepoPath(rcloneType string, rcloneConfig map[string]string, repoPath 
 	if rcloneType != "s3" {
 		return repoPath
 	}
-	bucket := rcloneConfig["bucket"]
+	bucket := storagecheck.S3BucketPathSegment(rcloneConfig["bucket"])
 	if bucket == "" {
 		return repoPath
 	}
-	return strings.Trim(bucket, "/") + "/" + strings.TrimLeft(repoPath, "/")
+	return bucket + "/" + strings.TrimLeft(repoPath, "/")
 }
 
 func storageRcloneConfig(rcloneType string, rcloneConfig map[string]string) map[string]string {

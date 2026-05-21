@@ -78,6 +78,33 @@ func (b *BackupPolicy) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+type AgentCommand struct {
+	ID              string     `gorm:"type:text;primaryKey" json:"id"`
+	AgentID         string     `gorm:"type:text;index;not null" json:"agent_id"`
+	Type            string     `gorm:"type:text;index;not null" json:"type"`
+	Status          string     `gorm:"type:text;index;not null" json:"status"`
+	MessageID       string     `gorm:"type:text;uniqueIndex;not null" json:"message_id"`
+	Payload         string     `gorm:"type:text" json:"-"`
+	Result          string     `gorm:"type:text" json:"result,omitempty"`
+	ErrorMessage    string     `gorm:"type:text" json:"error_message,omitempty"`
+	Attempts        int        `json:"attempts"`
+	PolicyID        string     `gorm:"type:text;index" json:"policy_id,omitempty"`
+	PolicyUpdatedAt *time.Time `gorm:"index" json:"policy_updated_at,omitempty"`
+	StorageID       string     `gorm:"type:text;index" json:"storage_id,omitempty"`
+	DeadlineAt      *time.Time `json:"deadline_at"`
+	DispatchedAt    *time.Time `json:"dispatched_at"`
+	CompletedAt     *time.Time `json:"completed_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+func (c *AgentCommand) BeforeCreate(tx *gorm.DB) error {
+	if c.ID == "" {
+		c.ID = uuid.NewString()
+	}
+	return nil
+}
+
 type TaskHistory struct {
 	ID         string     `gorm:"type:text;primaryKey" json:"id"`
 	AgentID    string     `gorm:"type:text;index;not null" json:"agent_id"`
@@ -85,12 +112,16 @@ type TaskHistory struct {
 	Status     string     `gorm:"type:text;not null" json:"status"`
 	SnapshotID string     `gorm:"type:text" json:"snapshot_id"`
 	MessageID  string     `gorm:"type:text;index" json:"message_id,omitempty"`
+	CommandID  string     `gorm:"type:text;index" json:"command_id,omitempty"`
+	PolicyID   string     `gorm:"type:text;index" json:"policy_id,omitempty"`
+	StorageID  string     `gorm:"type:text;index" json:"storage_id,omitempty"`
 	StartedAt  *time.Time `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at"`
 	DurationMs int64      `json:"duration_ms"`
 	RepoSize   int64      `json:"repo_size"`
 	ErrorLog   string     `gorm:"type:text" json:"error_log"`
 	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 func (th *TaskHistory) BeforeCreate(tx *gorm.DB) error {

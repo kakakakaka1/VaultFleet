@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/pkg/protocol"
 )
@@ -17,8 +19,9 @@ const defaultTaskListLimit = 50
 const maxTaskListLimit = 200
 
 type TaskHandler struct {
-	DB  *db.Database
-	Hub CommandHub
+	DB       *db.Database
+	Hub      CommandHub
+	Commands *commands.Service
 }
 
 type CommandHub interface {
@@ -33,12 +36,16 @@ type taskResponse struct {
 	Status     string     `json:"status"`
 	SnapshotID string     `json:"snapshot_id"`
 	MessageID  string     `json:"message_id,omitempty"`
+	CommandID  string     `json:"command_id,omitempty"`
+	PolicyID   string     `json:"policy_id,omitempty"`
+	StorageID  string     `json:"storage_id,omitempty"`
 	StartedAt  *time.Time `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at"`
 	DurationMs int64      `json:"duration_ms"`
 	RepoSize   int64      `json:"repo_size"`
 	ErrorLog   string     `json:"error_log,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 func NewTaskHandler(database *db.Database, hub CommandHub) *TaskHandler {
@@ -55,27 +62,50 @@ func (h *TaskHandler) BackupNow(c *gin.Context) {
 	if !agentExistsByID(c, h.DB, agentID) {
 		return
 	}
-	if h.Hub == nil || !h.Hub.IsOnline(agentID) {
-		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": "agent offline"})
-		return
-	}
 
 	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: agentID})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "encode backup request"})
 		return
 	}
-	if err := h.Hub.Send(agentID, *msg); err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": "agent offline"})
+	commandService := h.commandService()
+	command, err := commandService.CreateCommand(contextFromGin(c), commands.CreateCommandInput{
+		AgentID:   agentID,
+		Type:      protocol.TypeBackupNow,
+		Message:   *msg,
+		TaskType:  "backup",
+		TaskState: commands.TaskStatusPending,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
 		return
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{
-		"ok": true,
-		"data": gin.H{
-			"message_id": msg.ID,
-		},
+	if h.Hub != nil && h.Hub.IsOnline(agentID) {
+		if err := commandService.DispatchNewPendingForAgent(contextFromGin(c), agentID, 100); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
+			return
+		}
+	}
+
+	writeDataResponse(c, http.StatusAccepted, gin.H{
+		"command_id": command.ID,
+		"message_id": msg.ID,
 	})
+}
+
+func (h *TaskHandler) commandService() *commands.Service {
+	if h.Commands != nil {
+		return h.Commands
+	}
+	return commands.NewService(h.DB, h.Hub)
+}
+
+func contextFromGin(c *gin.Context) context.Context {
+	if c == nil || c.Request == nil {
+		return context.Background()
+	}
+	return c.Request.Context()
 }
 
 func (h *TaskHandler) List(c *gin.Context) {
@@ -130,11 +160,15 @@ func newTaskResponse(history db.TaskHistory) taskResponse {
 		Status:     history.Status,
 		SnapshotID: history.SnapshotID,
 		MessageID:  history.MessageID,
+		CommandID:  history.CommandID,
+		PolicyID:   history.PolicyID,
+		StorageID:  history.StorageID,
 		StartedAt:  history.StartedAt,
 		FinishedAt: history.FinishedAt,
 		DurationMs: history.DurationMs,
 		RepoSize:   history.RepoSize,
 		ErrorLog:   history.ErrorLog,
 		CreatedAt:  history.CreatedAt,
+		UpdatedAt:  history.UpdatedAt,
 	}
 }

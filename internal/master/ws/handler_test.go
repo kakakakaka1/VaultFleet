@@ -17,6 +17,7 @@ import (
 
 	agentenroll "vaultfleet/internal/agent/enroll"
 	masterapi "vaultfleet/internal/master/api"
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
 	"vaultfleet/pkg/protocol"
@@ -113,6 +114,33 @@ func TestHandler_ValidTokenAcceptedAndHubOnline(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return !setup.hub.IsOnline("agent-1")
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestHandlerDispatchesPendingCommandsOnConnect(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	dispatched := make(chan string, 1)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.PendingCommandDispatcher = func(agentID string) error {
+		dispatched <- agentID
+		return nil
+	}
+	setup.router.GET("/ws-command-dispatch", handler.HandleWebSocket)
+	server := httptest.NewServer(setup.router)
+	t.Cleanup(server.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial(
+		websocketURL(server.URL, "/ws-command-dispatch", url.Values{"token": []string{"valid-token"}}),
+		nil,
+	)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	select {
+	case agentID := <-dispatched:
+		assert.Equal(t, "agent-1", agentID)
+	case <-time.After(time.Second):
+		t.Fatal("pending command dispatcher was not called")
+	}
 }
 
 func TestHandler_HeartbeatDispatchUpdatesLastSeen(t *testing.T) {
@@ -403,6 +431,53 @@ func TestHandler_SnapshotListRespDispatchesToWaiter(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for snapshot list response")
 	}
+}
+
+func TestHandler_SnapshotListRespWithoutWaiterCompletesDurableCommand(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := db.Agent{Name: "Tokyo-1", Status: "online"}
+	require.NoError(t, database.DB.Create(&agent).Error)
+	commandService := commands.NewService(database, nil)
+	request, err := protocol.NewMessage(protocol.TypeSnapshotListReq, protocol.SnapshotListReqPayload{AgentID: agent.ID})
+	require.NoError(t, err)
+	command, err := commandService.CreateCommand(t.Context(), commands.CreateCommandInput{
+		AgentID: agent.ID,
+		Type:    protocol.TypeSnapshotListReq,
+		Message: *request,
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Update("status", commands.CommandStatusDispatched).Error)
+	snapshotTime := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	response, err := protocol.NewMessage(protocol.TypeSnapshotListResp, protocol.SnapshotListRespPayload{
+		AgentID: agent.ID,
+		Snapshots: []protocol.SnapshotInfo{
+			{ID: "snap-durable", Time: snapshotTime, Paths: []string{"/srv"}, Size: 1024},
+		},
+	})
+	require.NoError(t, err)
+	response.ID = request.ID
+
+	hub := NewHub()
+	handler := NewHandler(hub, events.NewBus(), validTestAuth, noPolicy, nil)
+	handler.SnapshotListResponseProcessor = masterapi.NewSnapshotListResponseProcessor(database, commandService)
+	handler.dispatch(agent.ID, *response)
+
+	var snapshot db.Snapshot
+	require.NoError(t, database.DB.First(&snapshot, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-durable").Error)
+	assert.True(t, snapshot.Timestamp.Equal(snapshotTime))
+	assert.JSONEq(t, `["/srv"]`, snapshot.Paths)
+	assert.Equal(t, int64(1024), snapshot.Size)
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, commands.CommandStatusSucceeded, found.Status)
+	assert.Contains(t, found.Result, `"snap-durable"`)
+	assert.Empty(t, found.ErrorMessage)
+	assert.NotNil(t, found.CompletedAt)
 }
 
 func TestHandler_OldConnectionCleanupDoesNotRemoveReplacementConnection(t *testing.T) {

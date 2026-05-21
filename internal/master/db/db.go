@@ -38,6 +38,7 @@ func New(dataDir string) (*Database, error) {
 		&Agent{},
 		&StorageConfig{},
 		&BackupPolicy{},
+		&AgentCommand{},
 		&TaskHistory{},
 		&Snapshot{},
 		&NotificationConfig{},
