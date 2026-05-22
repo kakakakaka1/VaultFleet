@@ -57,7 +57,21 @@ func (r ResticRunner) cacheDir() string {
 }
 
 func (r ResticRunner) baseArgs() []string {
-	return []string{"-r", r.repoArg(), "--password-file", r.PasswordFile}
+	args := []string{"-r", r.repoArg()}
+	if r.hasPassword() {
+		args = append(args, "--password-file", r.PasswordFile)
+	} else {
+		args = append(args, "--insecure-no-password")
+	}
+	return args
+}
+
+func (r ResticRunner) hasPassword() bool {
+	data, err := os.ReadFile(r.PasswordFile)
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(data))) > 0
 }
 
 func (r ResticRunner) buildInitCmd() *exec.Cmd {
@@ -147,6 +161,10 @@ func (r ResticRunner) InitRepo(ctx context.Context) error {
 		return nil
 	}
 
+	if err := r.ensureRemoteDir(ctx); err != nil {
+		return err
+	}
+
 	cmd := r.buildInitCmdContext(ctx)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -156,6 +174,21 @@ func (r ResticRunner) InitRepo(ctx context.Context) error {
 			return nil
 		}
 		return commandError("initialize restic repository", stderr.String(), err)
+	}
+	return nil
+}
+
+// ensureRemoteDir pre-creates the remote directory via rclone mkdir so that
+// restic init does not trigger Mkdir itself — some S3-compatible backends
+// (e.g. Tianyi Cloud) return 409 Conflict when the parent directory already exists.
+func (r ResticRunner) ensureRemoteDir(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "rclone", "mkdir", "vaultfleet:"+r.RepoPath)
+	cmd.Env = r.baseEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return commandError("pre-create remote directory", stderr.String(), err)
 	}
 	return nil
 }

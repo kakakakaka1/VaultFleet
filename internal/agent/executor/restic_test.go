@@ -13,9 +13,13 @@ import (
 )
 
 func TestBuildInitCmdIncludesRepoPasswordAndRcloneConfigEnv(t *testing.T) {
+	dir := t.TempDir()
+	pwFile := filepath.Join(dir, ".restic-password")
+	os.WriteFile(pwFile, []byte("secret"), 0o600)
+
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "backups/agent-1",
 	}
 
@@ -27,7 +31,7 @@ func TestBuildInitCmdIncludesRepoPasswordAndRcloneConfigEnv(t *testing.T) {
 		"-r",
 		"rclone:vaultfleet:backups/agent-1",
 		"--password-file",
-		"/tmp/.restic-password",
+		pwFile,
 	})
 	assertEnvContains(t, cmd.Env, "RCLONE_CONFIG=/tmp/rclone.conf")
 }
@@ -36,9 +40,12 @@ func TestBuildInitCmdProvidesCacheDirWhenServiceEnvironmentOmitsHome(t *testing.
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CACHE_HOME", "")
 	configDir := t.TempDir()
+	pwFile := filepath.Join(configDir, ".restic-password")
+	os.WriteFile(pwFile, []byte("secret"), 0o600)
+
 	runner := ResticRunner{
 		RcloneConfPath: filepath.Join(configDir, "rclone.conf"),
-		PasswordFile:   filepath.Join(configDir, ".restic-password"),
+		PasswordFile:   pwFile,
 		RepoPath:       "backups/agent-1",
 	}
 
@@ -48,9 +55,10 @@ func TestBuildInitCmdProvidesCacheDirWhenServiceEnvironmentOmitsHome(t *testing.
 }
 
 func TestBuildBackupCmdIncludesExcludesAndDirectories(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
@@ -62,7 +70,7 @@ func TestBuildBackupCmdIncludesExcludesAndDirectories(t *testing.T) {
 		"-r",
 		"rclone:vaultfleet:repo",
 		"--password-file",
-		"/tmp/.restic-password",
+		pwFile,
 		"--exclude=*.tmp",
 		"--exclude=/home/alice/cache",
 		"/home/alice",
@@ -72,9 +80,10 @@ func TestBuildBackupCmdIncludesExcludesAndDirectories(t *testing.T) {
 }
 
 func TestBuildForgetCmdIncludesPruneAndNonZeroRetention(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
@@ -90,7 +99,7 @@ func TestBuildForgetCmdIncludesPruneAndNonZeroRetention(t *testing.T) {
 		"-r",
 		"rclone:vaultfleet:repo",
 		"--password-file",
-		"/tmp/.restic-password",
+		pwFile,
 		"--prune",
 		"--keep-last=3",
 		"--keep-daily=7",
@@ -99,9 +108,10 @@ func TestBuildForgetCmdIncludesPruneAndNonZeroRetention(t *testing.T) {
 }
 
 func TestBuildSnapshotsCmdRequestsJSON(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
@@ -114,14 +124,15 @@ func TestBuildSnapshotsCmdRequestsJSON(t *testing.T) {
 		"-r",
 		"rclone:vaultfleet:repo",
 		"--password-file",
-		"/tmp/.restic-password",
+		pwFile,
 	})
 }
 
 func TestBuildStatsCmdRequestsRawRepositorySizeAsJSON(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
@@ -136,14 +147,15 @@ func TestBuildStatsCmdRequestsRawRepositorySizeAsJSON(t *testing.T) {
 		"-r",
 		"rclone:vaultfleet:repo",
 		"--password-file",
-		"/tmp/.restic-password",
+		pwFile,
 	})
 }
 
 func TestBuildRestoreCmdIncludesSnapshotAndTarget(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
@@ -158,7 +170,7 @@ func TestBuildRestoreCmdIncludesSnapshotAndTarget(t *testing.T) {
 		"-r",
 		"rclone:vaultfleet:repo",
 		"--password-file",
-		"/tmp/.restic-password",
+		pwFile,
 	})
 }
 
@@ -187,9 +199,10 @@ func TestInitRepoIgnoresAlreadyInitializedError(t *testing.T) {
 			})
 			prependPath(t, dir)
 
+			pwFile := writeTempPasswordFile(t, "secret")
 			runner := ResticRunner{
 				RcloneConfPath: "/tmp/rclone.conf",
-				PasswordFile:   "/tmp/.restic-password",
+				PasswordFile:   pwFile,
 				RepoPath:       "repo",
 			}
 
@@ -209,14 +222,71 @@ func TestInitRepoSkipsInitWhenSnapshotsCanListExistingRepository(t *testing.T) {
 	})
 	prependPath(t, dir)
 
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
 	if err := runner.InitRepo(context.Background()); err != nil {
 		t.Fatalf("InitRepo() error = %v, want nil", err)
+	}
+}
+
+func TestInitRepoCallsRcloneMkdirBeforeResticInit(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFakeRclone(t, dir, fakeResticScript{})
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"snapshots": {Stderr: "Is there a repository at the following location?\n", Exit: 1},
+		"init":      {Stdout: "created restic repository\n"},
+	})
+	prependPath(t, dir)
+
+	runner := ResticRunner{
+		RcloneConfPath: filepath.Join(dir, "rclone.conf"),
+		PasswordFile:   filepath.Join(dir, ".restic-password"),
+		RepoPath:       "backups/node-1",
+	}
+
+	if err := runner.InitRepo(context.Background()); err != nil {
+		t.Fatalf("InitRepo() error = %v, want nil", err)
+	}
+
+	logPath := filepath.Join(dir, "rclone.log")
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read rclone log: %v", err)
+	}
+	got := strings.TrimSpace(string(logData))
+	want := "mkdir vaultfleet:backups/node-1"
+	if got != want {
+		t.Fatalf("rclone called with %q, want %q", got, want)
+	}
+}
+
+func TestInitRepoReturnsErrorWhenRcloneMkdirFails(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFakeRclone(t, dir, fakeResticScript{Stderr: "mkdir failed\n", Exit: 1})
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"snapshots": {Stderr: "Is there a repository at the following location?\n", Exit: 1},
+	})
+	prependPath(t, dir)
+
+	runner := ResticRunner{
+		RcloneConfPath: filepath.Join(dir, "rclone.conf"),
+		PasswordFile:   filepath.Join(dir, ".restic-password"),
+		RepoPath:       "backups/node-1",
+	}
+
+	err := runner.InitRepo(context.Background())
+	if err == nil {
+		t.Fatal("InitRepo() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "pre-create remote directory") {
+		t.Fatalf("InitRepo() error = %q, want 'pre-create remote directory'", err.Error())
 	}
 }
 
@@ -226,9 +296,10 @@ func TestRunBackupReturnsStdoutAndIncludesStderrOnFailure(t *testing.T) {
 		writeFakeRestic(t, dir, fakeResticScript{Stdout: "snapshot abc123 saved\n"})
 		prependPath(t, dir)
 
+		pwFile := writeTempPasswordFile(t, "secret")
 		runner := ResticRunner{
 			RcloneConfPath: "/tmp/rclone.conf",
-			PasswordFile:   "/tmp/.restic-password",
+			PasswordFile:   pwFile,
 			RepoPath:       "repo",
 		}
 
@@ -246,9 +317,10 @@ func TestRunBackupReturnsStdoutAndIncludesStderrOnFailure(t *testing.T) {
 		writeFakeRestic(t, dir, fakeResticScript{Stderr: "backup failed for /data\n", Exit: 2})
 		prependPath(t, dir)
 
+		pwFile := writeTempPasswordFile(t, "secret")
 		runner := ResticRunner{
 			RcloneConfPath: "/tmp/rclone.conf",
-			PasswordFile:   "/tmp/.restic-password",
+			PasswordFile:   pwFile,
 			RepoPath:       "repo",
 		}
 
@@ -269,9 +341,10 @@ func TestListSnapshotsParsesResticJSON(t *testing.T) {
 	})
 	prependPath(t, dir)
 
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
@@ -298,9 +371,10 @@ func TestRepositorySizeParsesResticStatsJSON(t *testing.T) {
 	})
 	prependPath(t, dir)
 
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
@@ -318,9 +392,10 @@ func TestRepositorySizeReturnsStderrOnFailure(t *testing.T) {
 	writeFakeRestic(t, dir, fakeResticScript{Stderr: "stats failed\n", Exit: 1})
 	prependPath(t, dir)
 
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
@@ -338,9 +413,10 @@ func TestRestoreSnapshotReturnsStderrOnFailure(t *testing.T) {
 	writeFakeRestic(t, dir, fakeResticScript{Stderr: "restore failed\n", Exit: 1})
 	prependPath(t, dir)
 
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 
@@ -358,9 +434,10 @@ func TestRunForgetHonorsContextCancellation(t *testing.T) {
 	writeFakeRestic(t, dir, fakeResticScript{SleepSeconds: 2})
 	prependPath(t, dir)
 
+	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
 		RcloneConfPath: "/tmp/rclone.conf",
-		PasswordFile:   "/tmp/.restic-password",
+		PasswordFile:   pwFile,
 		RepoPath:       "repo",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -373,6 +450,54 @@ func TestRunForgetHonorsContextCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RunForget() error = %v, want context.Canceled", err)
 	}
+}
+
+func TestBaseArgsUsesInsecureNoPasswordWhenPasswordFileIsEmpty(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	cmd := runner.buildInitCmd()
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"init",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--insecure-no-password",
+	})
+}
+
+func TestBaseArgsUsesInsecureNoPasswordWhenPasswordFileMissing(t *testing.T) {
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   "/nonexistent/.restic-password",
+		RepoPath:       "repo",
+	}
+
+	cmd := runner.buildBackupCmd([]string{"/data"}, nil)
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"backup",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--insecure-no-password",
+		"/data",
+	})
+}
+
+func writeTempPasswordFile(t *testing.T, password string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".restic-password")
+	if err := os.WriteFile(path, []byte(password), 0o600); err != nil {
+		t.Fatalf("write password file: %v", err)
+	}
+	return path
 }
 
 func assertArgsEqual(t *testing.T, got, want []string) {
@@ -463,6 +588,27 @@ func writeFakeResticRouter(t *testing.T, dir string, scripts map[string]fakeRest
 
 	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
 		t.Fatalf("write fake restic router: %v", err)
+	}
+}
+
+func writeFakeRclone(t *testing.T, dir string, script fakeResticScript) {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("fake rclone shell script is not supported on windows")
+	}
+
+	path := filepath.Join(dir, "rclone")
+	logPath := filepath.Join(dir, "rclone.log")
+	content := "#!/bin/sh\n"
+	content += "echo \"$@\" >> " + shellQuote(logPath) + "\n"
+	if script.Stderr != "" {
+		content += "printf '%s' " + shellQuote(script.Stderr) + " >&2\n"
+	}
+	content += "exit " + strconv.Itoa(script.Exit) + "\n"
+
+	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+		t.Fatalf("write fake rclone: %v", err)
 	}
 }
 
