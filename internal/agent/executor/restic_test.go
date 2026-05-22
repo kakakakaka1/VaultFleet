@@ -128,6 +128,28 @@ func TestBuildSnapshotsCmdRequestsJSON(t *testing.T) {
 	})
 }
 
+func TestBuildLsSnapshotCmdIncludesSnapshotIDAndJSON(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	cmd := runner.buildLsSnapshotCmd("abc123")
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"ls",
+		"abc123",
+		"--json",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		pwFile,
+	})
+}
+
 func TestBuildStatsCmdRequestsRawRepositorySizeAsJSON(t *testing.T) {
 	pwFile := writeTempPasswordFile(t, "secret")
 	runner := ResticRunner{
@@ -159,7 +181,57 @@ func TestBuildRestoreCmdIncludesSnapshotAndTarget(t *testing.T) {
 		RepoPath:       "repo",
 	}
 
-	cmd := runner.buildRestoreCmd("abc123", "/restore/target")
+	cmd := runner.buildRestoreCmdWithIncludes("abc123", "/restore/target", nil)
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"restore",
+		"abc123",
+		"--target",
+		"/restore/target",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		pwFile,
+	})
+}
+
+func TestBuildRestoreCmdWithIncludePaths(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	cmd := runner.buildRestoreCmdWithIncludes("abc123", "/restore/target", []string{"/data/a", "/data/c"})
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"restore",
+		"abc123",
+		"--target",
+		"/restore/target",
+		"--include",
+		"/data/a",
+		"--include",
+		"/data/c",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		pwFile,
+	})
+}
+
+func TestBuildRestoreCmdWithEmptyIncludesHasNoIncludeFlag(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	cmd := runner.buildRestoreCmdWithIncludes("abc123", "/restore/target", nil)
 
 	assertArgsEqual(t, cmd.Args, []string{
 		"restic",
@@ -364,6 +436,40 @@ func TestListSnapshotsParsesResticJSON(t *testing.T) {
 	}
 }
 
+func TestLsSnapshotParsesResticJSONL(t *testing.T) {
+	dir := t.TempDir()
+	jsonl := `{"struct_type":"snapshot","id":"abc123","time":"2026-05-18T12:00:00Z","paths":["/data"]}
+{"struct_type":"node","name":"data","type":"dir","path":"/data","size":0,"mtime":"2026-05-18T12:00:00Z"}
+{"struct_type":"node","name":"file.txt","type":"file","path":"/data/file.txt","size":1024,"mtime":"2026-05-18T11:30:00Z"}
+`
+	writeFakeRestic(t, dir, fakeResticScript{Stdout: jsonl})
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	got, err := runner.LsSnapshot(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("LsSnapshot() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("LsSnapshot() returned %d entries, want 2", len(got))
+	}
+	if got[0].Path != "/data" || got[0].Type != "dir" {
+		t.Fatalf("entry[0] = %+v, want dir /data", got[0])
+	}
+	if got[1].Path != "/data/file.txt" || got[1].Type != "file" || got[1].Size != 1024 {
+		t.Fatalf("entry[1] = %+v, want file /data/file.txt size=1024", got[1])
+	}
+	if got[1].Mtime != "2026-05-18T11:30:00Z" {
+		t.Fatalf("entry[1].Mtime = %q, want 2026-05-18T11:30:00Z", got[1].Mtime)
+	}
+}
+
 func TestRepositorySizeParsesResticStatsJSON(t *testing.T) {
 	dir := t.TempDir()
 	writeFakeRestic(t, dir, fakeResticScript{
@@ -420,7 +526,7 @@ func TestRestoreSnapshotReturnsStderrOnFailure(t *testing.T) {
 		RepoPath:       "repo",
 	}
 
-	err := runner.RestoreSnapshot(context.Background(), "abc123", "/restore")
+	err := runner.RestoreSnapshot(context.Background(), "abc123", "/restore", nil)
 	if err == nil {
 		t.Fatal("RestoreSnapshot() error = nil, want error")
 	}

@@ -28,6 +28,13 @@ type SnapshotInfo struct {
 	Size     int64     `json:"size"`
 }
 
+type SnapshotFileEntry struct {
+	Path  string `json:"path"`
+	Type  string `json:"type"`
+	Size  int64  `json:"size"`
+	Mtime string `json:"mtime"`
+}
+
 type ResticRunner struct {
 	RcloneConfPath string
 	PasswordFile   string
@@ -90,12 +97,16 @@ func (r ResticRunner) buildSnapshotsCmd() *exec.Cmd {
 	return r.buildSnapshotsCmdContext(context.Background())
 }
 
+func (r ResticRunner) buildLsSnapshotCmd(snapshotID string) *exec.Cmd {
+	return r.buildLsSnapshotCmdContext(context.Background(), snapshotID)
+}
+
 func (r ResticRunner) buildStatsCmd() *exec.Cmd {
 	return r.buildStatsCmdContext(context.Background())
 }
 
-func (r ResticRunner) buildRestoreCmd(snapshotID, targetPath string) *exec.Cmd {
-	return r.buildRestoreCmdContext(context.Background(), snapshotID, targetPath)
+func (r ResticRunner) buildRestoreCmdWithIncludes(snapshotID, targetPath string, includePaths []string) *exec.Cmd {
+	return r.buildRestoreCmdWithIncludesContext(context.Background(), snapshotID, targetPath, includePaths)
 }
 
 func (r ResticRunner) buildInitCmdContext(ctx context.Context) *exec.Cmd {
@@ -136,14 +147,23 @@ func (r ResticRunner) buildSnapshotsCmdContext(ctx context.Context) *exec.Cmd {
 	return r.command(ctx, args...)
 }
 
+func (r ResticRunner) buildLsSnapshotCmdContext(ctx context.Context, snapshotID string) *exec.Cmd {
+	args := []string{"ls", snapshotID, "--json"}
+	args = append(args, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
 func (r ResticRunner) buildStatsCmdContext(ctx context.Context) *exec.Cmd {
 	args := []string{"stats", "--mode", "raw-data", "--json"}
 	args = append(args, r.baseArgs()...)
 	return r.command(ctx, args...)
 }
 
-func (r ResticRunner) buildRestoreCmdContext(ctx context.Context, snapshotID, targetPath string) *exec.Cmd {
+func (r ResticRunner) buildRestoreCmdWithIncludesContext(ctx context.Context, snapshotID, targetPath string, includePaths []string) *exec.Cmd {
 	args := []string{"restore", snapshotID, "--target", targetPath}
+	for _, p := range includePaths {
+		args = append(args, "--include", p)
+	}
 	args = append(args, r.baseArgs()...)
 	return r.command(ctx, args...)
 }
@@ -264,6 +284,44 @@ func (r ResticRunner) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
 	return snapshots, nil
 }
 
+func (r ResticRunner) LsSnapshot(ctx context.Context, snapshotID string) ([]SnapshotFileEntry, error) {
+	cmd := r.buildLsSnapshotCmdContext(ctx, snapshotID)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, commandError("list snapshot contents", stderr.String(), err)
+	}
+
+	var entries []SnapshotFileEntry
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var raw struct {
+			StructType string `json:"struct_type"`
+			Path       string `json:"path"`
+			Type       string `json:"type"`
+			Size       int64  `json:"size"`
+			Mtime      string `json:"mtime"`
+		}
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			continue
+		}
+		if raw.StructType != "node" {
+			continue
+		}
+		entries = append(entries, SnapshotFileEntry{
+			Path:  raw.Path,
+			Type:  raw.Type,
+			Size:  raw.Size,
+			Mtime: raw.Mtime,
+		})
+	}
+	return entries, nil
+}
+
 func (r ResticRunner) RepositorySize(ctx context.Context) (int64, error) {
 	cmd := r.buildStatsCmdContext(ctx)
 	var stdout, stderr bytes.Buffer
@@ -283,8 +341,8 @@ func (r ResticRunner) RepositorySize(ctx context.Context) (int64, error) {
 	return stats.TotalSize, nil
 }
 
-func (r ResticRunner) RestoreSnapshot(ctx context.Context, snapshotID, targetPath string) error {
-	cmd := r.buildRestoreCmdContext(ctx, snapshotID, targetPath)
+func (r ResticRunner) RestoreSnapshot(ctx context.Context, snapshotID, targetPath string, includePaths []string) error {
+	cmd := r.buildRestoreCmdWithIncludesContext(ctx, snapshotID, targetPath, includePaths)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 

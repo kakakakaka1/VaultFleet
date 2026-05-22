@@ -57,7 +57,7 @@ type resticExecutor interface {
 	RunForget(ctx context.Context, retention RetentionPolicy) error
 	ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
 	RepositorySize(ctx context.Context) (int64, error)
-	RestoreSnapshot(ctx context.Context, snapshotID, targetPath string) error
+	RestoreSnapshot(ctx context.Context, snapshotID, targetPath string, includePaths []string) error
 }
 
 type Executor struct {

@@ -314,7 +314,7 @@ func (r *recordingRunner) RepositorySize(context.Context) (int64, error) {
 	return r.repoSize, r.statsErr
 }
 
-func (r *recordingRunner) RestoreSnapshot(context.Context, string, string) error {
+func (r *recordingRunner) RestoreSnapshot(context.Context, string, string, []string) error {
 	r.calls = append(r.calls, "restore")
 	return r.restoreErr
 }
