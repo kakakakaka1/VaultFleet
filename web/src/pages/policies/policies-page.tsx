@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { listPolicies, createPolicy, updatePolicy, deletePolicy } from "@/services/policies";
-import { listAgents } from "@/services/agents";
+import { listAgents, backupNow } from "@/services/agents";
 import { listStorage } from "@/services/storage";
 import { copyToClipboard } from "@/lib/utils";
 import { BackupPolicy, PolicyInput } from "@/types/policy";
@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Plus, ShieldCheck, Settings2, Trash2, MoreHorizontal, Info, Copy, Check } from "lucide-react";
+import { Plus, ShieldCheck, Settings2, Trash2, MoreHorizontal, Info, Copy, Check, Play } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -30,20 +30,56 @@ import { zhCN } from "date-fns/locale";
 import { toast } from "sonner";
 import { describeCron } from "@/lib/cron";
 
+const RETENTION_PRESETS: Record<string, { label: string; description: string; values: { keep_last: number; keep_daily: number; keep_weekly: number; keep_monthly: number } }> = {
+  basic: {
+    label: "基础",
+    description: "约 3 个月深度，适合非关键数据",
+    values: { keep_last: 7, keep_daily: 7, keep_weekly: 4, keep_monthly: 3 },
+  },
+  standard: {
+    label: "标准",
+    description: "约半年深度，适合大多数场景",
+    values: { keep_last: 10, keep_daily: 7, keep_weekly: 4, keep_monthly: 6 },
+  },
+  archive: {
+    label: "长期归档",
+    description: "约 1 年深度，适合重要业务数据",
+    values: { keep_last: 10, keep_daily: 14, keep_weekly: 8, keep_monthly: 12 },
+  },
+  custom: {
+    label: "自定义",
+    description: "手动设置各维度保留数量",
+    values: { keep_last: 7, keep_daily: 7, keep_weekly: 4, keep_monthly: 6 },
+  },
+};
+
+function detectRetentionPreset(retention: { keep_last: number; keep_daily: number; keep_weekly: number; keep_monthly: number }): string {
+  for (const [key, preset] of Object.entries(RETENTION_PRESETS)) {
+    if (key === "custom") continue;
+    const v = preset.values;
+    if (retention.keep_last === v.keep_last && retention.keep_daily === v.keep_daily && retention.keep_weekly === v.keep_weekly && retention.keep_monthly === v.keep_monthly) {
+      return key;
+    }
+  }
+  return "custom";
+}
+
 export function PoliciesPage() {
   const queryClient = useQueryClient();
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmBackupAgentId, setConfirmBackupAgentId] = useState<string | null>(null);
   const [generatedPassword, setGeneratedPassword] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [retentionPreset, setRetentionPreset] = useState("standard");
 
   const [formData, setFormData] = useState<PolicyInput>({
     agent_id: "",
     storage_id: "",
     repo_path: "vaultfleet",
     restic_password: "",
-    backup_dirs: ["/etc"],
+    backup_dirs: [],
     exclude_patterns: ["/tmp", "/proc", "/sys", "/dev"],
     schedule: "0 2 * * *",
     retention: {
@@ -98,6 +134,23 @@ export function PoliciesPage() {
     },
   });
 
+  const backupMutation = useMutation({
+    mutationFn: (agentId: string) => backupNow(agentId),
+    onSuccess: (data) => {
+      setConfirmBackupAgentId(null);
+      const agent = agents?.find(a => a.id === confirmBackupAgentId);
+      if (agent?.status === "online") {
+        toast.success("备份命令已下发", { description: `Message ID: ${data.message_id}` });
+      } else {
+        toast.info("备份命令已排队", { description: "节点上线后将自动执行" });
+      }
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error: any) => {
+      toast.error("发起备份失败", { description: error.message });
+    },
+  });
+
   const handleEdit = (policy: BackupPolicy) => {
     setEditingId(policy.id);
     setFormData({
@@ -109,6 +162,7 @@ export function PoliciesPage() {
       schedule: policy.schedule,
       retention: policy.retention,
     });
+    setRetentionPreset(detectRetentionPreset(policy.retention));
     setIsDrawerOpen(true);
   };
 
@@ -122,13 +176,14 @@ export function PoliciesPage() {
         storage_id: "",
         repo_path: "vaultfleet",
         restic_password: "",
-        backup_dirs: ["/etc"],
+        backup_dirs: [],
         exclude_patterns: ["/tmp", "/proc", "/sys", "/dev"],
         schedule: "0 2 * * *",
         retention: { keep_last: 7, keep_daily: 7, keep_weekly: 4, keep_monthly: 6 },
       });
       createMutation.reset();
       updateMutation.reset();
+      setRetentionPreset("standard");
     }
   };
 
@@ -230,10 +285,10 @@ export function PoliciesPage() {
                     id="repo_path"
                     value={formData.repo_path}
                     onChange={(e) => setFormData({ ...formData, repo_path: e.target.value })}
-                    placeholder="如: vaultfleet/agent-1"
+                    placeholder="如: vaultfleet/my-server"
                     disabled={!!editingId}
                   />
-                  <p className="text-xs text-muted-foreground">数据将存放在存储端点的此目录下。</p>
+                  <p className="text-xs text-muted-foreground">备份数据在存储端点中的唯一路径。留空默认生成。相同路径 = 相同仓库，更换节点后使用原路径即可恢复数据。</p>
                 </div>
 
                 {!editingId && (
@@ -293,17 +348,61 @@ export function PoliciesPage() {
                 </div>
 
                 <div className="space-y-4 border-t pt-4">
-                  <Label>保留策略 (Retention)</Label>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label className="text-xs">保留最近副本</Label>
-                      <Input type="number" value={formData.retention.keep_last} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_last: parseInt(e.target.value) }})} />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-xs">保留每日副本</Label>
-                      <Input type="number" value={formData.retention.keep_daily} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_daily: parseInt(e.target.value) }})} />
-                    </div>
+                  <div className="space-y-1">
+                    <Label>保留策略 (Retention)</Label>
+                    <p className="text-xs text-muted-foreground">每次备份后自动清理旧快照，释放存储空间。</p>
                   </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {Object.entries(RETENTION_PRESETS).map(([key, preset]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => {
+                          setRetentionPreset(key);
+                          if (key !== "custom") {
+                            setFormData({ ...formData, retention: { ...preset.values } });
+                          }
+                        }}
+                        className={`rounded-lg border p-3 text-left transition-colors ${
+                          retentionPreset === key
+                            ? "border-primary bg-primary/5 ring-1 ring-primary"
+                            : "border-border hover:border-muted-foreground/30"
+                        }`}
+                      >
+                        <div className="text-sm font-medium">{preset.label}</div>
+                        <div className="text-[11px] text-muted-foreground mt-0.5">{preset.description}</div>
+                      </button>
+                    ))}
+                  </div>
+                  {retentionPreset === "custom" && (
+                    <div className="grid grid-cols-2 gap-4 pt-2">
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">保留最近副本</Label>
+                        <Input type="number" min={0} value={formData.retention.keep_last} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_last: parseInt(e.target.value) || 0 }})} />
+                        <p className="text-[11px] text-muted-foreground">始终保留最近 N 个快照</p>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">保留每日副本</Label>
+                        <Input type="number" min={0} value={formData.retention.keep_daily} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_daily: parseInt(e.target.value) || 0 }})} />
+                        <p className="text-[11px] text-muted-foreground">每天保留 1 个，共 N 天</p>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">保留每周副本</Label>
+                        <Input type="number" min={0} value={formData.retention.keep_weekly} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_weekly: parseInt(e.target.value) || 0 }})} />
+                        <p className="text-[11px] text-muted-foreground">每周保留 1 个，共 N 周</p>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">保留每月副本</Label>
+                        <Input type="number" min={0} value={formData.retention.keep_monthly} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_monthly: parseInt(e.target.value) || 0 }})} />
+                        <p className="text-[11px] text-muted-foreground">每月保留 1 个，共 N 个月</p>
+                      </div>
+                    </div>
+                  )}
+                  {retentionPreset !== "custom" && (
+                    <div className="text-xs text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
+                      最近 {formData.retention.keep_last} 个 · 每日 {formData.retention.keep_daily} 份 · 每周 {formData.retention.keep_weekly} 份 · 每月 {formData.retention.keep_monthly} 份
+                    </div>
+                  )}
                 </div>
 
                 <div className="fixed bottom-0 right-0 left-0 bg-background border-t p-4 lg:left-auto lg:w-[var(--radix-sheet-width)]">
@@ -360,6 +459,9 @@ export function PoliciesPage() {
                         <DropdownMenuItem onClick={() => handleEdit(p)}>
                           <Settings2 className="mr-2 h-4 w-4" /> 编辑
                         </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setConfirmBackupAgentId(p.agent_id)}>
+                          <Play className="mr-2 h-4 w-4" /> 立即备份
+                        </DropdownMenuItem>
                         <DropdownMenuItem className="text-red-600" onClick={() => setConfirmDeleteId(p.id)}>
                           <Trash2 className="mr-2 h-4 w-4" /> 删除
                         </DropdownMenuItem>
@@ -380,6 +482,16 @@ export function PoliciesPage() {
         description="此操作将停止该节点的自动备份任务。存储中的备份数据不会被删除。"
         onConfirm={() => confirmDeleteId && deleteMutation.mutate(confirmDeleteId)}
         loading={deleteMutation.isPending}
+      />
+
+      <ConfirmDialog
+        open={!!confirmBackupAgentId}
+        onOpenChange={(open) => !open && setConfirmBackupAgentId(null)}
+        title="确认立即备份"
+        description={`将对节点 ${agents?.find(a => a.id === confirmBackupAgentId)?.name ?? confirmBackupAgentId} 发起立即备份请求。`}
+        onConfirm={() => confirmBackupAgentId && backupMutation.mutate(confirmBackupAgentId)}
+        loading={backupMutation.isPending}
+        confirmText="立即备份"
       />
     </div>
   );
