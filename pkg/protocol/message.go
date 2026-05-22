@@ -10,19 +10,21 @@ import (
 
 // Message type constants identify WebSocket payload kinds exchanged by master and agents.
 const (
-	TypeHeartbeat        = "heartbeat"
-	TypeDirBrowseReq     = "dir_browse_req"
-	TypeDirBrowseResp    = "dir_browse_resp"
-	TypePolicyPush       = "policy_push"
-	TypePolicyAck        = "policy_ack"
-	TypeBackupNow        = "backup_now"
-	TypeTaskResult       = "task_result"
-	TypeRestoreReq       = "restore_req"
-	TypeRestoreProgress  = "restore_progress"
-	TypeSnapshotListReq  = "snapshot_list_req"
-	TypeSnapshotListResp = "snapshot_list_resp"
-	TypeCollectLogsReq   = "collect_logs_req"
-	TypeCollectLogsResp  = "collect_logs_resp"
+	TypeHeartbeat          = "heartbeat"
+	TypeDirBrowseReq       = "dir_browse_req"
+	TypeDirBrowseResp      = "dir_browse_resp"
+	TypePolicyPush         = "policy_push"
+	TypePolicyAck          = "policy_ack"
+	TypeBackupNow          = "backup_now"
+	TypeTaskResult         = "task_result"
+	TypeRestoreReq         = "restore_req"
+	TypeRestoreProgress    = "restore_progress"
+	TypeSnapshotListReq    = "snapshot_list_req"
+	TypeSnapshotListResp   = "snapshot_list_resp"
+	TypeSnapshotBrowseReq  = "snapshot_browse_req"
+	TypeSnapshotBrowseResp = "snapshot_browse_resp"
+	TypeCollectLogsReq     = "collect_logs_req"
+	TypeCollectLogsResp    = "collect_logs_resp"
 )
 
 // Message is the shared WebSocket envelope used by master and agents.
@@ -169,13 +171,34 @@ type BackupNowPayload struct {
 
 // RestoreReqPayload requests a snapshot restore to a target path.
 type RestoreReqPayload struct {
-	SnapshotID string `json:"snapshot_id"`
-	Target     string `json:"target"`
+	SnapshotID   string   `json:"snapshot_id"`
+	Target       string   `json:"target"`
+	IncludePaths []string `json:"include_paths,omitempty"`
 }
 
 // SnapshotListReqPayload requests repository snapshots from an agent.
 type SnapshotListReqPayload struct {
 	AgentID string `json:"agent_id"`
+}
+
+// SnapshotBrowseReqPayload requests entries contained in one repository snapshot.
+type SnapshotBrowseReqPayload struct {
+	SnapshotID string `json:"snapshot_id"`
+}
+
+// SnapshotBrowseRespPayload returns file entries contained in one snapshot.
+type SnapshotBrowseRespPayload struct {
+	SnapshotID string              `json:"snapshot_id"`
+	Entries    []SnapshotFileEntry `json:"entries"`
+	Error      string              `json:"error,omitempty"`
+}
+
+// SnapshotFileEntry describes one file or directory inside a snapshot.
+type SnapshotFileEntry struct {
+	Path  string `json:"path"`
+	Type  string `json:"type"`
+	Size  int64  `json:"size"`
+	Mtime string `json:"mtime"`
 }
 
 // CollectLogsReqPayload requests recent logs from an agent.
