@@ -286,6 +286,66 @@ func TestHandlerHeartbeatWithCapabilitiesDispatchesPendingCommandsAfterStateUpda
 	}
 }
 
+func TestHandlerHeartbeatWithCapabilitiesDispatchesPendingCommandsOnce(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.HeartbeatStateUpdater = func(string, string, *time.Time, *protocol.HeartbeatPayload) error {
+		return nil
+	}
+	dispatches := make(chan string, 2)
+	handler.PendingCommandDispatcher = func(agentID string) error {
+		dispatches <- agentID
+		return nil
+	}
+	msg, err := protocol.NewMessage(protocol.TypeHeartbeat, protocol.HeartbeatPayload{
+		Capabilities: []string{protocol.CapabilityRestoreIncludePaths},
+	})
+	require.NoError(t, err)
+
+	handler.dispatch("agent-1", *msg)
+	handler.dispatch("agent-1", *msg)
+
+	select {
+	case agentID := <-dispatches:
+		assert.Equal(t, "agent-1", agentID)
+	case <-time.After(time.Second):
+		t.Fatal("pending command dispatcher was not called")
+	}
+	select {
+	case agentID := <-dispatches:
+		t.Fatalf("pending command dispatcher called more than once: %s", agentID)
+	default:
+	}
+}
+
+func TestHandlerCapabilityDispatchResetsAfterConnectionCleanup(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.HeartbeatStateUpdater = func(string, string, *time.Time, *protocol.HeartbeatPayload) error {
+		return nil
+	}
+	var dispatches int
+	handler.PendingCommandDispatcher = func(agentID string) error {
+		assert.Equal(t, "agent-1", agentID)
+		dispatches++
+		return nil
+	}
+	msg, err := protocol.NewMessage(protocol.TypeHeartbeat, protocol.HeartbeatPayload{
+		Capabilities: []string{protocol.CapabilityRestoreIncludePaths},
+	})
+	require.NoError(t, err)
+	firstConn := &SafeConn{}
+	secondConn := &SafeConn{}
+	setup.hub.Add("agent-1", firstConn)
+
+	handler.dispatch("agent-1", *msg)
+	handler.cleanupConnection("agent-1", firstConn)
+	setup.hub.Add("agent-1", secondConn)
+	handler.dispatch("agent-1", *msg)
+
+	assert.Equal(t, 2, dispatches)
+}
+
 func TestHandler_HeartbeatDispatchMarksAgentOnline(t *testing.T) {
 	setup := setupHandlerTest(t, validTestAuth, noPolicy)
 	setup.hub.Add("agent-1", &SafeConn{})

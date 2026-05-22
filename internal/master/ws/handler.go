@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -36,19 +37,22 @@ type Handler struct {
 	AgentStateUpdater             func(agentID string, status string, lastSeenAt *time.Time) error
 	HeartbeatStateUpdater         func(agentID string, status string, lastSeenAt *time.Time, heartbeat *protocol.HeartbeatPayload) error
 	upgrader                      websocket.Upgrader
+	capabilityDispatchMu          sync.Mutex
+	capabilityDispatches          map[string]struct{}
 	now                           func() time.Time
 	pongWait                      time.Duration
 }
 
 func NewHandler(hub *Hub, eventBus *events.Bus, authAgent AgentAuthFunc, policyLookup PolicyLookupFunc, taskResultProcess TaskResultProcessorFunc) *Handler {
 	return &Handler{
-		hub:               hub,
-		eventBus:          eventBus,
-		authAgent:         authAgent,
-		policyLookup:      policyLookup,
-		taskResultProcess: taskResultProcess,
-		now:               time.Now,
-		pongWait:          defaultPongWait,
+		hub:                  hub,
+		eventBus:             eventBus,
+		authAgent:            authAgent,
+		policyLookup:         policyLookup,
+		taskResultProcess:    taskResultProcess,
+		capabilityDispatches: make(map[string]struct{}),
+		now:                  time.Now,
+		pongWait:             defaultPongWait,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: allowAgentOrigin,
 		},
@@ -88,6 +92,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 
 	safeConn := NewSafeConn(conn)
 	h.hub.Add(agentID, safeConn)
+	h.resetCapabilityDispatch(agentID)
 	now := h.now()
 	h.hub.UpdateLastSeen(agentID, now)
 	h.updateAgentState(agentID, "online", &now)
@@ -120,9 +125,26 @@ func (h *Handler) dispatchPendingCommands(agentID string) {
 
 func (h *Handler) cleanupConnection(agentID string, conn *SafeConn) {
 	if h.hub.RemoveIfCurrent(agentID, conn) {
+		h.resetCapabilityDispatch(agentID)
 		h.updateAgentState(agentID, "offline", nil)
 		h.eventBus.Publish(events.Event{Type: events.AgentOffline, Payload: agentID})
 	}
+}
+
+func (h *Handler) resetCapabilityDispatch(agentID string) {
+	h.capabilityDispatchMu.Lock()
+	delete(h.capabilityDispatches, agentID)
+	h.capabilityDispatchMu.Unlock()
+}
+
+func (h *Handler) markCapabilityDispatch(agentID string) bool {
+	h.capabilityDispatchMu.Lock()
+	defer h.capabilityDispatchMu.Unlock()
+	if _, dispatched := h.capabilityDispatches[agentID]; dispatched {
+		return false
+	}
+	h.capabilityDispatches[agentID] = struct{}{}
+	return true
 }
 
 func (h *Handler) readLoop(agentID string, conn *SafeConn) {
@@ -155,7 +177,9 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 				if err := h.HeartbeatStateUpdater(agentID, "online", &now, heartbeat); err != nil {
 					log.Printf("update agent %s heartbeat state failed: %v", agentID, err)
 				} else if len(heartbeat.Capabilities) > 0 {
-					h.dispatchPendingCommands(agentID)
+					if h.markCapabilityDispatch(agentID) {
+						h.dispatchPendingCommands(agentID)
+					}
 				}
 			}
 		}
