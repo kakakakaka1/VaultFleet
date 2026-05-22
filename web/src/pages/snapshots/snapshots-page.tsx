@@ -5,6 +5,7 @@ import { listSnapshots, refreshSnapshots, restoreSnapshot } from "@/services/sna
 import { listAgents } from "@/services/agents";
 import { Snapshot } from "@/types/snapshot";
 import { Button } from "@/components/ui/button";
+import { SnapshotTreeBrowser } from "@/components/snapshot-tree-browser";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { RefreshCw, Camera, Undo2, AlertCircle, CheckCircle2, Info } from "lucide-react";
@@ -31,6 +32,7 @@ export function SnapshotsPage() {
   const [targetPath, setTargetPath] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [restoreSuccessId, setRestoreSuccessId] = useState<string | null>(null);
+  const [includePaths, setIncludePaths] = useState<string[]>([]);
 
   const { data: agents } = useQuery({ queryKey: ["agents"], queryFn: listAgents });
   const { data: policies } = useQuery({ queryKey: ["policies"], queryFn: () => listPolicies() });
@@ -57,7 +59,7 @@ export function SnapshotsPage() {
   });
 
   const restoreMutation = useMutation({
-    mutationFn: (data: { snapshot_id: string; target_path: string }) => restoreSnapshot(agentId, data),
+    mutationFn: (data: { snapshot_id: string; target_path: string; include_paths?: string[] }) => restoreSnapshot(agentId, data),
     onSuccess: (data) => {
       setRestoreSuccessId(data.message_id);
       const msg = data.message === "restore queued" ? "恢复命令已排队" : "恢复任务已开始";
@@ -83,6 +85,7 @@ export function SnapshotsPage() {
     setTargetPath(s.paths[0] || "");
     setConfirmed(false);
     setRestoreSuccessId(null);
+    setIncludePaths([]);
     restoreMutation.reset();
   };
 
@@ -92,6 +95,7 @@ export function SnapshotsPage() {
     restoreMutation.mutate({
       snapshot_id: selectedSnapshot!.id,
       target_path: targetPath,
+      ...(includePaths.length > 0 ? { include_paths: includePaths } : {}),
     });
   };
 
@@ -246,6 +250,14 @@ export function SnapshotsPage() {
                 <div className="text-sm">{selectedSnapshot && format(new Date(selectedSnapshot.time), "yyyy-MM-dd HH:mm:ss", { locale: zhCN })}</div>
               </div>
 
+              <SnapshotTreeBrowser
+                agentId={agentId}
+                snapshotId={selectedSnapshot?.id || ""}
+                isAgentOnline={currentAgent?.status === "online"}
+                selectedPaths={includePaths}
+                onSelectedPathsChange={setIncludePaths}
+              />
+
               <div className="space-y-2">
                 <Label htmlFor="target_path">目标路径</Label>
                 <Input
@@ -273,7 +285,11 @@ export function SnapshotsPage() {
 
               <div className="fixed bottom-0 right-0 left-0 bg-background border-t p-4 lg:left-auto lg:w-[var(--radix-sheet-width)]">
                  <Button type="submit" className="w-full" disabled={!confirmed || restoreMutation.isPending}>
-                  {restoreMutation.isPending ? "正在提交..." : "开始恢复"}
+                  {restoreMutation.isPending
+                    ? "正在提交..."
+                    : includePaths.length > 0
+                      ? `恢复选中的 ${includePaths.length} 项`
+                      : "恢复全部"}
                 </Button>
               </div>
             </form>
