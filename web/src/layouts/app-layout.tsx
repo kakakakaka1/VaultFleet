@@ -95,7 +95,7 @@ export function AppLayout({ user }: AppLayoutProps) {
         {sidebarContent}
       </div>
       <div className="flex flex-col">
-        <header className="flex h-14 items-center gap-4 border-b bg-muted/40 px-6 lg:h-[60px]">
+        <header className="flex h-14 items-center gap-4 border-b bg-muted/40 px-6">
           <Sheet>
             <SheetTrigger asChild>
               <Button variant="outline" size="icon" className="shrink-0 lg:hidden">
