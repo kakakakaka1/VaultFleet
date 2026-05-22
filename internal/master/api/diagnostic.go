@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"runtime"
@@ -49,13 +50,23 @@ func (h *DiagnosticHandler) Generate(c *gin.Context) {
 	zw := zip.NewWriter(c.Writer)
 	defer zw.Close()
 
-	h.writeMeta(zw)
-	h.writeMasterLogs(zw)
-	h.writeNodes(zw)
-	h.writeStorage(zw)
-	h.writePolicies(zw)
-	h.writeRecentErrors(zw)
-	h.collectAgentLogs(zw, agentIDs)
+	warnings := make([]string, 0)
+	recordWarning := func(err error) {
+		if err == nil {
+			return
+		}
+		text := redact.Text(err.Error())
+		log.Printf("diagnostic: %s", text)
+		warnings = append(warnings, text)
+	}
+
+	recordWarning(h.writeMasterLogs(zw))
+	recordWarning(h.writeNodes(zw))
+	recordWarning(h.writeStorage(zw))
+	recordWarning(h.writePolicies(zw))
+	recordWarning(h.writeRecentErrors(zw))
+	warnings = append(warnings, h.collectAgentLogs(zw, agentIDs)...)
+	h.writeMeta(zw, warnings)
 }
 
 func parseAgentIDs(raw string) []string {
@@ -63,36 +74,43 @@ func parseAgentIDs(raw string) []string {
 		return nil
 	}
 	ids := make([]string, 0)
+	seen := make(map[string]bool)
 	for _, id := range strings.Split(raw, ",") {
 		id = strings.TrimSpace(id)
-		if id != "" {
+		if id != "" && !seen[id] {
+			seen[id] = true
 			ids = append(ids, id)
 		}
 	}
 	return ids
 }
 
-func (h *DiagnosticHandler) writeMeta(zw *zip.Writer) {
-	writeJSONFile(zw, "meta.json", map[string]any{
+func (h *DiagnosticHandler) writeMeta(zw *zip.Writer, warnings []string) {
+	meta := map[string]any{
 		"version":      h.Version,
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 		"os":           runtime.GOOS,
 		"arch":         runtime.GOARCH,
-	})
-}
-
-func (h *DiagnosticHandler) writeMasterLogs(zw *zip.Writer) {
-	if h.LogBuf == nil {
-		return
 	}
-	writeTextFile(zw, "master/logs.txt", redact.Text(string(h.LogBuf.Bytes())))
+	if len(warnings) > 0 {
+		meta["warnings"] = warnings
+	}
+	if err := writeJSONFile(zw, "meta.json", meta); err != nil {
+		log.Printf("diagnostic: write meta failed: %v", err)
+	}
 }
 
-func (h *DiagnosticHandler) writeNodes(zw *zip.Writer) {
+func (h *DiagnosticHandler) writeMasterLogs(zw *zip.Writer) error {
+	if h.LogBuf == nil {
+		return nil
+	}
+	return writeTextFile(zw, "master/logs.txt", redact.Text(string(h.LogBuf.Bytes())))
+}
+
+func (h *DiagnosticHandler) writeNodes(zw *zip.Writer) error {
 	var agents []db.Agent
 	if err := h.DB.DB.Find(&agents).Error; err != nil {
-		log.Printf("diagnostic: query agents failed: %v", err)
-		return
+		return fmt.Errorf("query agents failed: %w", err)
 	}
 
 	type nodeInfo struct {
@@ -112,14 +130,13 @@ func (h *DiagnosticHandler) writeNodes(zw *zip.Writer) {
 			SystemInfo: agent.SystemInfo,
 		})
 	}
-	writeJSONFile(zw, "master/nodes.json", nodes)
+	return writeJSONFile(zw, "master/nodes.json", nodes)
 }
 
-func (h *DiagnosticHandler) writeStorage(zw *zip.Writer) {
+func (h *DiagnosticHandler) writeStorage(zw *zip.Writer) error {
 	var configs []db.StorageConfig
 	if err := h.DB.DB.Find(&configs).Error; err != nil {
-		log.Printf("diagnostic: query storage failed: %v", err)
-		return
+		return fmt.Errorf("query storage failed: %w", err)
 	}
 
 	type storageInfo struct {
@@ -135,14 +152,13 @@ func (h *DiagnosticHandler) writeStorage(zw *zip.Writer) {
 			RcloneType: config.RcloneType,
 		})
 	}
-	writeJSONFile(zw, "master/storage.json", items)
+	return writeJSONFile(zw, "master/storage.json", items)
 }
 
-func (h *DiagnosticHandler) writePolicies(zw *zip.Writer) {
+func (h *DiagnosticHandler) writePolicies(zw *zip.Writer) error {
 	var policies []db.BackupPolicy
 	if err := h.DB.DB.Find(&policies).Error; err != nil {
-		log.Printf("diagnostic: query policies failed: %v", err)
-		return
+		return fmt.Errorf("query policies failed: %w", err)
 	}
 
 	type policyInfo struct {
@@ -164,17 +180,16 @@ func (h *DiagnosticHandler) writePolicies(zw *zip.Writer) {
 			Synced:    policy.Synced,
 		})
 	}
-	writeJSONFile(zw, "master/policies.json", items)
+	return writeJSONFile(zw, "master/policies.json", items)
 }
 
-func (h *DiagnosticHandler) writeRecentErrors(zw *zip.Writer) {
+func (h *DiagnosticHandler) writeRecentErrors(zw *zip.Writer) error {
 	var tasks []db.TaskHistory
 	if err := h.DB.DB.Where("status = ?", "failed").
 		Order("created_at DESC").
 		Limit(50).
 		Find(&tasks).Error; err != nil {
-		log.Printf("diagnostic: query failed tasks failed: %v", err)
-		return
+		return fmt.Errorf("query failed tasks failed: %w", err)
 	}
 
 	type errorInfo struct {
@@ -196,24 +211,29 @@ func (h *DiagnosticHandler) writeRecentErrors(zw *zip.Writer) {
 			FinishedAt: task.FinishedAt,
 		})
 	}
-	writeJSONFile(zw, "master/recent_errors.json", items)
+	return writeJSONFile(zw, "master/recent_errors.json", items)
 }
 
-func (h *DiagnosticHandler) collectAgentLogs(zw *zip.Writer, agentIDs []string) {
+func (h *DiagnosticHandler) collectAgentLogs(zw *zip.Writer, agentIDs []string) []string {
+	warnings := make([]string, 0)
 	if h.Hub == nil || len(agentIDs) == 0 {
-		return
+		return warnings
 	}
 
 	agentNames := h.loadAgentNames(agentIDs)
 	for _, agentID := range agentIDs {
 		name := agentNames[agentID]
-		if name == "" {
-			name = agentID
+		dirName := fmt.Sprintf("agents/%s", safeArchiveSegment(agentID))
+		recordAgentFailure := func(message string) {
+			message = redact.Text(message)
+			warnings = append(warnings, agentWarning(agentID, name, message))
+			if err := writeTextFile(zw, dirName+"/error.txt", message); err != nil {
+				warnings = append(warnings, agentWarning(agentID, name, err.Error()))
+			}
 		}
-		dirName := fmt.Sprintf("agents/%s", name)
 
 		if !h.Hub.IsOnline(agentID) {
-			writeTextFile(zw, dirName+"/error.txt", "agent offline at collection time")
+			recordAgentFailure("agent offline at collection time")
 			continue
 		}
 
@@ -221,34 +241,41 @@ func (h *DiagnosticHandler) collectAgentLogs(zw *zip.Writer, agentIDs []string) 
 			MaxBytes: 5 * 1024 * 1024,
 		})
 		if err != nil {
-			writeTextFile(zw, dirName+"/error.txt", fmt.Sprintf("create message failed: %v", err))
+			recordAgentFailure(fmt.Sprintf("create message failed: %v", err))
 			continue
 		}
 
 		respCh, err := h.Hub.SendAndWait(agentID, *msg, 30*time.Second)
 		if err != nil {
-			writeTextFile(zw, dirName+"/error.txt", fmt.Sprintf("send failed: %v", err))
+			recordAgentFailure(fmt.Sprintf("send failed: %v", err))
 			continue
 		}
 
 		resp, ok := <-respCh
 		if !ok {
-			writeTextFile(zw, dirName+"/timeout.txt", "agent did not respond within 30 seconds")
+			message := "agent did not respond within 30 seconds"
+			warnings = append(warnings, agentWarning(agentID, name, message))
+			if err := writeTextFile(zw, dirName+"/timeout.txt", message); err != nil {
+				warnings = append(warnings, agentWarning(agentID, name, err.Error()))
+			}
 			continue
 		}
 
 		payload, err := protocol.ParsePayload[protocol.CollectLogsRespPayload](&resp)
 		if err != nil {
-			writeTextFile(zw, dirName+"/error.txt", fmt.Sprintf("parse response failed: %v", err))
+			recordAgentFailure(fmt.Sprintf("parse response failed: %v", err))
 			continue
 		}
 		if payload.Error != "" {
-			writeTextFile(zw, dirName+"/error.txt", payload.Error)
+			recordAgentFailure(payload.Error)
 		}
 		if payload.Logs != "" {
-			writeTextFile(zw, dirName+"/logs.txt", payload.Logs)
+			if err := writeTextFile(zw, dirName+"/logs.txt", payload.Logs); err != nil {
+				warnings = append(warnings, agentWarning(agentID, name, err.Error()))
+			}
 		}
 	}
+	return warnings
 }
 
 func (h *DiagnosticHandler) loadAgentNames(agentIDs []string) map[string]string {
@@ -263,26 +290,48 @@ func (h *DiagnosticHandler) loadAgentNames(agentIDs []string) map[string]string 
 	return names
 }
 
-func writeJSONFile(zw *zip.Writer, name string, data any) {
+func safeArchiveSegment(segment string) string {
+	var b strings.Builder
+	for _, r := range segment {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
+}
+
+func agentWarning(agentID string, name string, message string) string {
+	if name == "" || name == agentID {
+		return fmt.Sprintf("agent %s: %s", agentID, message)
+	}
+	return fmt.Sprintf("agent %s (%s): %s", agentID, name, message)
+}
+
+func writeJSONFile(zw *zip.Writer, name string, data any) error {
 	w, err := zw.Create(name)
 	if err != nil {
-		log.Printf("diagnostic: create zip entry %s failed: %v", name, err)
-		return
+		return fmt.Errorf("create zip entry %s: %w", name, err)
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(data); err != nil {
-		log.Printf("diagnostic: write zip entry %s failed: %v", name, err)
+		return fmt.Errorf("write zip entry %s: %w", name, err)
 	}
+	return nil
 }
 
-func writeTextFile(zw *zip.Writer, name string, content string) {
+func writeTextFile(zw *zip.Writer, name string, content string) error {
 	w, err := zw.Create(name)
 	if err != nil {
-		log.Printf("diagnostic: create zip entry %s failed: %v", name, err)
-		return
+		return fmt.Errorf("create zip entry %s: %w", name, err)
 	}
-	if _, err := w.Write([]byte(content)); err != nil {
-		log.Printf("diagnostic: write zip entry %s failed: %v", name, err)
+	if _, err := io.WriteString(w, content); err != nil {
+		return fmt.Errorf("write zip entry %s: %w", name, err)
 	}
+	return nil
 }

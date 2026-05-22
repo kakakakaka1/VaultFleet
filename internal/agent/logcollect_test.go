@@ -22,7 +22,8 @@ func TestCollectLogs_FromFile(t *testing.T) {
 		now.Add(-5*time.Minute).Format(time.RFC3339) + " latest line\n"
 	require.NoError(t, os.WriteFile(logFile, []byte(lines), 0o644))
 
-	result := collectLogsFromFile(logFile, 1024*1024)
+	result, err := collectLogsFromFile(logFile, 1024*1024)
+	require.NoError(t, err)
 	assert.Contains(t, result, "latest line")
 	assert.Contains(t, result, "[REDACTED]")
 	assert.NotContains(t, result, "secret123")
@@ -39,7 +40,8 @@ func TestCollectLogs_Truncation(t *testing.T) {
 	data[99] = '\n'
 	require.NoError(t, os.WriteFile(logFile, data, 0o644))
 
-	result := collectLogsFromFile(logFile, 50)
+	result, err := collectLogsFromFile(logFile, 50)
+	require.NoError(t, err)
 	assert.LessOrEqual(t, len(result), 50)
 }
 
@@ -48,7 +50,8 @@ func TestCollectLogs_TruncationAfterRedaction(t *testing.T) {
 	logFile := filepath.Join(dir, "agent.log")
 	require.NoError(t, os.WriteFile(logFile, []byte("password=x\n"), 0o644))
 
-	result := collectLogsFromFile(logFile, len("password=x\n"))
+	result, err := collectLogsFromFile(logFile, len("password=x\n"))
+	require.NoError(t, err)
 
 	assert.LessOrEqual(t, len(result), len("password=x\n"))
 	assert.NotContains(t, result, "x")
@@ -59,7 +62,8 @@ func TestCollectLogs_TruncationDoesNotExposeClippedSecret(t *testing.T) {
 	logFile := filepath.Join(dir, "agent.log")
 	require.NoError(t, os.WriteFile(logFile, []byte("password=very-secret-value\n"), 0o644))
 
-	result := collectLogsFromFile(logFile, len("secret-value\n"))
+	result, err := collectLogsFromFile(logFile, len("secret-value\n"))
+	require.NoError(t, err)
 
 	assert.LessOrEqual(t, len(result), len("secret-value\n"))
 	assert.NotContains(t, result, "very-secret-value")
@@ -67,8 +71,27 @@ func TestCollectLogs_TruncationDoesNotExposeClippedSecret(t *testing.T) {
 }
 
 func TestCollectLogs_MissingFile(t *testing.T) {
-	result := collectLogsFromFile("/nonexistent/path/agent.log", 1024)
+	result, err := collectLogsFromFile("/nonexistent/path/agent.log", 1024)
 	assert.Equal(t, "", result)
+	require.Error(t, err)
+}
+
+func TestCollectLogsFromFile_ReturnsReadError(t *testing.T) {
+	logs, err := collectLogsFromFile("/nonexistent/path/agent.log", 1024)
+
+	assert.Empty(t, logs)
+	require.Error(t, err)
+}
+
+func TestCollectLogs_ReturnsNoSourceError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+
+	logs, err := collectLogs(filepath.Join(dir, "missing.log"), 1024)
+
+	assert.Empty(t, logs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no agent log source found")
 }
 
 func TestDetectLogSource_Fallback(t *testing.T) {
@@ -128,4 +151,19 @@ func TestHandler_InjectedLogFileBypassesJournalctlDetection(t *testing.T) {
 	assert.NotContains(t, payload.Logs, "host journal")
 	assert.NotContains(t, payload.Logs, "file-secret")
 	assert.NotContains(t, payload.Logs, "host-secret")
+}
+
+func TestHandler_HandleCollectLogsReqReportsReadError(t *testing.T) {
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{SendFunc: sent.send, LogFile: "/nonexistent/path/agent.log"})
+	msg, err := protocol.NewMessage(protocol.TypeCollectLogsReq, protocol.CollectLogsReqPayload{MaxBytes: 1024})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	require.Len(t, sent.messages, 1)
+	payload, err := protocol.ParsePayload[protocol.CollectLogsRespPayload](&sent.messages[0])
+	require.NoError(t, err)
+	assert.Empty(t, payload.Logs)
+	assert.Contains(t, payload.Error, "/nonexistent/path/agent.log")
 }

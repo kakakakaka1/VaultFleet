@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,10 +31,14 @@ type fakeDiagnosticHub struct {
 	online    map[string]bool
 	responses map[string]protocol.Message
 	sent      []protocol.Message
+	sendErr   map[string]error
 }
 
 func (h *fakeDiagnosticHub) SendAndWait(agentID string, msg protocol.Message, timeout time.Duration) (<-chan protocol.Message, error) {
 	h.sent = append(h.sent, msg)
+	if err := h.sendErr[agentID]; err != nil {
+		return nil, err
+	}
 	ch := make(chan protocol.Message, 1)
 	if resp, ok := h.responses[agentID]; ok {
 		resp.ID = msg.ID
@@ -57,6 +62,7 @@ func setupDiagnosticAPI(t *testing.T) diagnosticTestSetup {
 	hub := &fakeDiagnosticHub{
 		online:    make(map[string]bool),
 		responses: make(map[string]protocol.Message),
+		sendErr:   make(map[string]error),
 	}
 	buf := logbuf.New(1024)
 	h := &DiagnosticHandler{
@@ -161,7 +167,42 @@ func TestDiagnosticHandler_CollectsSelectedAgentLogs(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	files := readZipFiles(t, w.Body)
-	assert.Equal(t, "agent log token=[REDACTED]\n", files["agents/Agent One/logs.txt"])
+	assert.Equal(t, "agent log token=[REDACTED]\n", files["agents/"+agentID+"/logs.txt"])
 	require.Len(t, setup.hub.sent, 1)
 	assert.Equal(t, protocol.TypeCollectLogsReq, setup.hub.sent[0].Type)
+}
+
+func TestDiagnosticHandler_UsesAgentIDForArchivePathsAndRecordsWarnings(t *testing.T) {
+	setup := setupDiagnosticAPI(t)
+	traversalID := seedDiagnosticAgent(t, setup.database, "../../escape", "online")
+	collidingID := seedDiagnosticAgent(t, setup.database, "safe/name", "online")
+	setup.hub.online[traversalID] = true
+	setup.hub.online[collidingID] = true
+	setup.hub.sendErr[traversalID] = errors.New("connection refused")
+	resp, err := protocol.NewMessage(protocol.TypeCollectLogsResp, protocol.CollectLogsRespPayload{
+		Error: "journalctl unavailable",
+	})
+	require.NoError(t, err)
+	setup.hub.responses[collidingID] = *resp
+
+	req := httptest.NewRequest(http.MethodGet, "/api/system/diagnostic?agents="+traversalID+","+collidingID, nil)
+	w := httptest.NewRecorder()
+	setup.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	files := readZipFiles(t, w.Body)
+	assert.Contains(t, files, "agents/"+traversalID+"/error.txt")
+	assert.Contains(t, files, "agents/"+collidingID+"/error.txt")
+	assert.NotContains(t, files, "agents/../../escape/error.txt")
+	assert.NotContains(t, files, "agents/safe/name/error.txt")
+
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal([]byte(files["meta.json"]), &meta))
+	warnings, ok := meta["warnings"].([]any)
+	require.True(t, ok)
+	require.Len(t, warnings, 2)
+	assert.Contains(t, warnings[0].(string), traversalID)
+	assert.Contains(t, warnings[0].(string), "connection refused")
+	assert.Contains(t, warnings[1].(string), collidingID)
+	assert.Contains(t, warnings[1].(string), "journalctl unavailable")
 }

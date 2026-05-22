@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -32,7 +33,7 @@ func detectLogSource(fallbackLogFile string) logSource {
 
 const defaultLogFile = "/var/log/vaultfleet-agent.log"
 
-func collectLogs(logFile string, maxBytes int) string {
+func collectLogs(logFile string, maxBytes int) (string, error) {
 	source := detectLogSource(logFile)
 	switch source {
 	case logSourceJournalctl:
@@ -40,26 +41,26 @@ func collectLogs(logFile string, maxBytes int) string {
 	case logSourceFile:
 		return collectLogsFromFile(logFile, maxBytes)
 	default:
-		return ""
+		return "", fmt.Errorf("no agent log source found")
 	}
 }
 
-func collectLogsFromJournalctl(maxBytes int) string {
+func collectLogsFromJournalctl(maxBytes int) (string, error) {
 	cmd := exec.Command("journalctl", "-u", "vaultfleet-agent", "--since", "24 hours ago", "--no-pager")
 	out, err := cmd.Output()
 	if err != nil {
 		log.Printf("collect journalctl logs failed: %v", err)
-		return ""
+		return "", fmt.Errorf("collect journalctl logs: %w", err)
 	}
-	return redactAndLimit(string(out), maxBytes)
+	return redactAndLimit(string(out), maxBytes), nil
 }
 
-func collectLogsFromFile(path string, maxBytes int) string {
+func collectLogsFromFile(path string, maxBytes int) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read log file %s: %w", path, err)
 	}
-	return redactAndLimit(string(data), maxBytes)
+	return redactAndLimit(string(data), maxBytes), nil
 }
 
 func redactAndLimit(text string, maxBytes int) string {

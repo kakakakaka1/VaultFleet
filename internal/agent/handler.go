@@ -761,13 +761,18 @@ func (h *Handler) handleCollectLogsReq(msg protocol.Message) {
 	}
 
 	logs := ""
+	errorText := ""
 	if h.logFile != "" {
-		logs = collectLogsFromFile(h.logFile, maxBytes)
+		logs, err = collectLogsFromFile(h.logFile, maxBytes)
 	} else {
-		logs = collectLogs(defaultLogFile, maxBytes)
+		logs, err = collectLogs(defaultLogFile, maxBytes)
+	}
+	if err != nil {
+		errorText = err.Error()
 	}
 	resp, err := protocol.NewMessage(protocol.TypeCollectLogsResp, protocol.CollectLogsRespPayload{
-		Logs: logs,
+		Logs:  logs,
+		Error: errorText,
 	})
 	if err != nil {
 		log.Printf("create collect_logs response failed: %v", err)
