@@ -66,8 +66,11 @@ export function SnapshotTreeBrowser({
   }, [browseMutation, isAgentOnline]);
 
   const handleRefresh = useCallback(() => {
+    if (!isAgentOnline) {
+      return;
+    }
     browseMutation.mutate();
-  }, [browseMutation]);
+  }, [browseMutation, isAgentOnline]);
 
   const handleToggleNode = useCallback((path: string) => {
     setExpandedNodes((prev) => {
@@ -83,7 +86,9 @@ export function SnapshotTreeBrowser({
 
   const getCheckedState = useCallback(
     (node: TreeNode): boolean | "indeterminate" => {
-      const affectedPaths = getAllPaths(node);
+      const affectedPaths = node.type === "dir" && node.children.length > 0
+        ? getDescendantPaths(node)
+        : [node.path];
       const selectedCount = affectedPaths.filter((path) => selectedPathSet.has(path)).length;
 
       if (selectedCount === 0) {
@@ -148,7 +153,7 @@ export function SnapshotTreeBrowser({
           variant="ghost"
           size="icon"
           className="h-7 w-7 shrink-0"
-          disabled={browseMutation.isPending}
+          disabled={!isAgentOnline || browseMutation.isPending}
           onClick={handleRefresh}
           aria-label="刷新快照内容"
         >
@@ -351,6 +356,10 @@ function buildTree(entries: SnapshotFileEntry[]): TreeNode[] {
 
 function getAllPaths(node: TreeNode): string[] {
   return [node.path, ...node.children.flatMap((child) => getAllPaths(child))];
+}
+
+function getDescendantPaths(node: TreeNode): string[] {
+  return node.children.flatMap((child) => getAllPaths(child));
 }
 
 function getPathName(path: string): string {

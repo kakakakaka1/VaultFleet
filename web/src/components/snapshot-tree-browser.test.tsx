@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +12,7 @@ vi.mock("@/services/snapshots", () => ({
 
 afterEach(() => {
   vi.clearAllMocks();
+  cleanup();
 });
 
 describe("SnapshotTreeBrowser", () => {
@@ -88,6 +89,54 @@ describe("SnapshotTreeBrowser", () => {
 
     expect(onSelectedPathsChange).toHaveBeenLastCalledWith([]);
   });
+
+  it("checks a parent directory when all descendants are selected even if the parent path is not", async () => {
+    const user = userEvent.setup();
+    vi.mocked(browseSnapshot).mockResolvedValue({
+      snapshot_id: "snap-1",
+      entries: [
+        { path: "/data", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
+        { path: "/data/docs", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
+        { path: "/data/docs/readme.md", type: "file", size: 2048, mtime: "2026-05-22T00:00:00Z" },
+        { path: "/data/photo.jpg", type: "file", size: 1024, mtime: "2026-05-22T00:00:00Z" },
+      ],
+    });
+
+    renderBrowser({
+      selectedPaths: ["/data/docs", "/data/docs/readme.md", "/data/photo.jpg"],
+    });
+
+    await user.click(screen.getByRole("button", { name: /浏览快照内容/ }));
+    expect(await screen.findByText("data")).toBeInTheDocument();
+
+    const dataRow = screen.getByText("data").closest("[data-snapshot-tree-row]");
+    expect(dataRow).not.toBeNull();
+    expect(within(dataRow as HTMLElement).getByRole("checkbox", { name: "选择 /data" }))
+      .toHaveAttribute("aria-checked", "true");
+  });
+
+  it("disables refresh after expansion when the agent goes offline", async () => {
+    const user = userEvent.setup();
+    vi.mocked(browseSnapshot).mockResolvedValue({
+      snapshot_id: "snap-1",
+      entries: [],
+    });
+
+    const { rerender } = renderBrowser();
+
+    await user.click(screen.getByRole("button", { name: /浏览快照内容/ }));
+    expect(await screen.findByText("快照为空")).toBeInTheDocument();
+    expect(browseSnapshot).toHaveBeenCalledTimes(1);
+
+    rerenderBrowser(rerender, { isAgentOnline: false });
+
+    const refreshButton = screen.getByRole("button", { name: "刷新快照内容" });
+    expect(refreshButton).toBeDisabled();
+
+    await user.click(refreshButton);
+
+    expect(browseSnapshot).toHaveBeenCalledTimes(1);
+  });
 });
 
 function renderBrowser(
@@ -101,6 +150,31 @@ function renderBrowser(
   });
 
   return render(
+    <QueryClientProvider client={queryClient}>
+      <SnapshotTreeBrowser
+        agentId="agent-1"
+        snapshotId="snap-1"
+        isAgentOnline
+        selectedPaths={[]}
+        onSelectedPathsChange={vi.fn()}
+        {...props}
+      />
+    </QueryClientProvider>,
+  );
+}
+
+function rerenderBrowser(
+  rerender: ReturnType<typeof render>["rerender"],
+  props: Partial<ComponentProps<typeof SnapshotTreeBrowser>> = {},
+) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  rerender(
     <QueryClientProvider client={queryClient}>
       <SnapshotTreeBrowser
         agentId="agent-1"
