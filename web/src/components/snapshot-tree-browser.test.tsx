@@ -1,0 +1,115 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { ComponentProps } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { browseSnapshot } from "@/services/snapshots";
+import { SnapshotTreeBrowser } from "./snapshot-tree-browser";
+
+vi.mock("@/services/snapshots", () => ({
+  browseSnapshot: vi.fn(),
+}));
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("SnapshotTreeBrowser", () => {
+  it("disables browsing while the agent is offline", async () => {
+    const user = userEvent.setup();
+
+    renderBrowser({ isAgentOnline: false });
+
+    const browseButton = screen.getByRole("button", { name: /需要节点在线才能浏览/ });
+    expect(browseButton).toBeDisabled();
+
+    await user.click(browseButton);
+
+    expect(browseSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("loads snapshot entries and selecting a directory reports the directory and descendants", async () => {
+    const onSelectedPathsChange = vi.fn();
+    const user = userEvent.setup();
+    vi.mocked(browseSnapshot).mockResolvedValue({
+      snapshot_id: "snap-1",
+      entries: [
+        { path: "/data", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
+        { path: "/data/docs", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
+        { path: "/data/docs/readme.md", type: "file", size: 2048, mtime: "2026-05-22T00:00:00Z" },
+        { path: "/data/photo.jpg", type: "file", size: 1024, mtime: "2026-05-22T00:00:00Z" },
+      ],
+    });
+
+    renderBrowser({ onSelectedPathsChange });
+
+    await user.click(screen.getByRole("button", { name: /浏览快照内容/ }));
+
+    expect(browseSnapshot).toHaveBeenCalledWith("agent-1", { snapshot_id: "snap-1" });
+    expect(await screen.findByText("data")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "展开 /data" }));
+
+    expect(screen.getByText("docs")).toBeInTheDocument();
+    expect(screen.getByText("photo.jpg")).toBeInTheDocument();
+
+    const dataRow = screen.getByText("data").closest("[data-snapshot-tree-row]");
+    expect(dataRow).not.toBeNull();
+
+    await user.click(within(dataRow as HTMLElement).getByRole("checkbox", { name: "选择 /data" }));
+
+    expect(onSelectedPathsChange).toHaveBeenLastCalledWith([
+      "/data",
+      "/data/docs",
+      "/data/docs/readme.md",
+      "/data/photo.jpg",
+    ]);
+  });
+
+  it("clears selected paths from the expanded footer", async () => {
+    const onSelectedPathsChange = vi.fn();
+    const user = userEvent.setup();
+    vi.mocked(browseSnapshot).mockResolvedValue({
+      snapshot_id: "snap-1",
+      entries: [],
+    });
+
+    renderBrowser({
+      selectedPaths: ["/data", "/data/file.txt"],
+      onSelectedPathsChange,
+    });
+
+    await user.click(screen.getByRole("button", { name: /浏览快照内容/ }));
+
+    expect(await screen.findByText("快照为空")).toBeInTheDocument();
+    expect(screen.getByText("已选中 2 项")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "清除选择" }));
+
+    expect(onSelectedPathsChange).toHaveBeenLastCalledWith([]);
+  });
+});
+
+function renderBrowser(
+  props: Partial<ComponentProps<typeof SnapshotTreeBrowser>> = {},
+) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <SnapshotTreeBrowser
+        agentId="agent-1"
+        snapshotId="snap-1"
+        isAgentOnline
+        selectedPaths={[]}
+        onSelectedPathsChange={vi.fn()}
+        {...props}
+      />
+    </QueryClientProvider>,
+  );
+}
