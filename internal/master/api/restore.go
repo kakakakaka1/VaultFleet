@@ -24,9 +24,10 @@ type RestoreHub interface {
 }
 
 type restoreRequest struct {
-	SnapshotID string `json:"snapshot_id" binding:"required"`
-	TargetPath string `json:"target_path"`
-	Target     string `json:"target"`
+	SnapshotID   string   `json:"snapshot_id" binding:"required"`
+	TargetPath   string   `json:"target_path"`
+	Target       string   `json:"target"`
+	IncludePaths []string `json:"include_paths"`
 }
 
 func NewRestoreHandler(database *db.Database, hub RestoreHub) *RestoreHandler {
@@ -62,8 +63,9 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 	}
 
 	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
-		SnapshotID: snapshotID,
-		Target:     targetPath,
+		SnapshotID:   snapshotID,
+		Target:       targetPath,
+		IncludePaths: request.IncludePaths,
 	})
 	if err != nil {
 		writeErrorResponse(c, http.StatusInternalServerError, "encode restore request")

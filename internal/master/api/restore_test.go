@@ -182,6 +182,24 @@ func TestRestoreAcceptsAcceptanceTargetAlias(t *testing.T) {
 	assert.Equal(t, "/opt/vaultfleet-restore", payload.Target)
 }
 
+func TestRestoreWithIncludePathsPassesThemInPayload(t *testing.T) {
+	setup := setupRestoreAPI(t)
+	agent := createRestoreTestAgent(t, setup.database, "online")
+	setup.hub.online[agent.ID] = true
+
+	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/restore", map[string]any{
+		"snapshot_id":   "snap-1",
+		"target_path":   "/restore/target",
+		"include_paths": []string{"/etc/hosts", "/var/log/app.log"},
+	})
+
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	require.Len(t, setup.hub.sent, 1)
+	payload, err := protocol.ParsePayload[protocol.RestoreReqPayload](&setup.hub.sent[0].message)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/etc/hosts", "/var/log/app.log"}, payload.IncludePaths)
+}
+
 func TestRestoreRecordsPendingCommandAndTaskBeforeSendingMessage(t *testing.T) {
 	setup := setupRestoreAPI(t)
 	agent := createRestoreTestAgent(t, setup.database, "online")

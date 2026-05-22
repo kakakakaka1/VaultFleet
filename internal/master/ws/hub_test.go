@@ -268,6 +268,38 @@ func TestHub_SendAndWaitReturnsMatchingCollectLogsResponse(t *testing.T) {
 	assert.False(t, hub.HasWaiter("agent-1", "logs-1"))
 }
 
+func TestHub_SendAndWaitReturnsMatchingSnapshotBrowseResponse(t *testing.T) {
+	hub := NewHub()
+	clientConn := addTestWebSocketAgent(t, hub, "agent-1")
+	request := protocol.Message{
+		Type:    protocol.TypeSnapshotBrowseReq,
+		ID:      "snapshot-browse-1",
+		Payload: json.RawMessage(`{"snapshot_id":"snap-1"}`),
+	}
+	response := protocol.Message{
+		Type:    protocol.TypeSnapshotBrowseResp,
+		ID:      "snapshot-browse-1",
+		Payload: json.RawMessage(`{"snapshot_id":"snap-1","entries":[]}`),
+	}
+
+	respCh, err := hub.SendAndWait("agent-1", request, 500*time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, hub.HasWaiter("agent-1", "snapshot-browse-1"))
+	var sent protocol.Message
+	require.NoError(t, clientConn.ReadJSON(&sent))
+	assert.Equal(t, request, sent)
+
+	assert.True(t, hub.HandleResponse("agent-1", response))
+
+	select {
+	case got := <-respCh:
+		assert.Equal(t, response, got)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for snapshot browse response")
+	}
+	assert.False(t, hub.HasWaiter("agent-1", "snapshot-browse-1"))
+}
+
 func TestHub_SendAndWaitCleansWaiterOnTimeout(t *testing.T) {
 	hub := NewHub()
 	clientConn := addTestWebSocketAgent(t, hub, "agent-1")
