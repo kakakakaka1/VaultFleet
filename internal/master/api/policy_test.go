@@ -131,7 +131,7 @@ func TestCreatePolicyWithProvidedRepoPathAndPassword(t *testing.T) {
 	assert.NotContains(t, stored.ResticPassword, "provided-secret")
 }
 
-func TestCreatePolicyAutoGeneratesPassword(t *testing.T) {
+func TestCreatePolicyEmptyPasswordStoresEncryptedEmpty(t *testing.T) {
 	setup := setupTestPolicyAPI(t)
 	agent := createPolicyTestAgent(t, setup.database)
 	storage := createPolicyTestStorage(t, setup.database)
@@ -141,7 +141,9 @@ func TestCreatePolicyAutoGeneratesPassword(t *testing.T) {
 
 	var stored db.BackupPolicy
 	require.NoError(t, setup.database.DB.First(&stored, "id = ?", created["id"]).Error)
-	assert.NotEmpty(t, stored.ResticPassword)
+	decrypted, err := db.Decrypt(stored.ResticPassword, setup.database.MasterKey)
+	require.NoError(t, err)
+	assert.Empty(t, decrypted)
 }
 
 func TestCreatePolicyValidatesReferencedAgentAndStorage(t *testing.T) {

@@ -1,8 +1,6 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -86,17 +84,7 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 		repoPath = "vaultfleet/" + request.AgentID
 	}
 
-	resticPassword := request.ResticPassword
-	if resticPassword == "" {
-		generatedPassword, err := generateResticPassword(32)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "password generation failed"})
-			return
-		}
-		resticPassword = generatedPassword
-	}
-
-	encryptedPassword, err := db.Encrypt(resticPassword, h.MasterKey)
+	encryptedPassword, err := db.Encrypt(request.ResticPassword, h.MasterKey)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "encryption failed"})
 		return
@@ -347,13 +335,4 @@ func marshalPolicyJSON(c *gin.Context, value any) (string, bool) {
 	}
 
 	return string(data), true
-}
-
-func generateResticPassword(length int) (string, error) {
-	bytes := make([]byte, length)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(bytes)[:length], nil
 }

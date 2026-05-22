@@ -3,14 +3,14 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { listPolicies, createPolicy, updatePolicy, deletePolicy } from "@/services/policies";
 import { listAgents, backupNow } from "@/services/agents";
 import { listStorage } from "@/services/storage";
-import { copyToClipboard } from "@/lib/utils";
+
 import { BackupPolicy, PolicyInput, RetentionConfig } from "@/types/policy";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Plus, ShieldCheck, Settings2, Trash2, MoreHorizontal, Info, Copy, Check, Play } from "lucide-react";
+import { Plus, ShieldCheck, Settings2, Trash2, MoreHorizontal, Check, Play } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,7 +24,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorPanel } from "@/components/error-panel";
 import { DirectoryBrowser } from "@/components/directory-browser";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { toast } from "sonner";
@@ -70,8 +70,6 @@ export function PoliciesPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmBackupAgentId, setConfirmBackupAgentId] = useState<string | null>(null);
-  const [generatedPassword, setGeneratedPassword] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [retentionPreset, setRetentionPreset] = useState("standard");
 
   const [formData, setFormData] = useState<PolicyInput>({
@@ -96,12 +94,8 @@ export function PoliciesPage() {
 
   const createMutation = useMutation({
     mutationFn: createPolicy,
-    onSuccess: (data) => {
-      if (data.restic_password) {
-        setGeneratedPassword(data.restic_password);
-      } else {
-        setIsDrawerOpen(false);
-      }
+    onSuccess: () => {
+      setIsDrawerOpen(false);
       queryClient.invalidateQueries({ queryKey: ["policies"] });
       toast.success("策略已创建");
     },
@@ -173,7 +167,6 @@ export function PoliciesPage() {
     setIsDrawerOpen(open);
     if (!open) {
       setEditingId(null);
-      setGeneratedPassword(null);
       setFormData({
         agent_id: "",
         storage_id: "",
@@ -221,36 +214,6 @@ export function PoliciesPage() {
               </SheetDescription>
             </SheetHeader>
 
-            {generatedPassword ? (
-              <div className="py-6 space-y-4">
-                <Alert className="bg-amber-50 border-amber-200">
-                  <Info className="h-4 w-4 text-amber-600" />
-                  <AlertTitle className="text-amber-800">请妥善保存 Restic 密码</AlertTitle>
-                  <AlertDescription className="text-amber-700">
-                    这是该策略的仓库加密密码。系统仅在创建时显示一次。
-                  </AlertDescription>
-                </Alert>
-                <div className="relative group">
-                  <pre className="p-4 bg-muted rounded-lg font-mono text-sm break-all whitespace-pre-wrap">
-                    {generatedPassword}
-                  </pre>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="absolute top-2 right-2 h-8 w-8"
-                    onClick={() => {
-                      copyToClipboard(generatedPassword).then(() => {
-                        setCopied(true);
-                        setTimeout(() => setCopied(false), 2000);
-                      });
-                    }}
-                  >
-                    {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
-                  </Button>
-                </div>
-                <Button className="w-full" onClick={() => handleDrawerClose(false)}>我已记录，关闭</Button>
-              </div>
-            ) : (
               <form onSubmit={handleSubmit} className="space-y-6 py-6 pb-20">
                 <ErrorPanel error={(createMutation.error || updateMutation.error) as any} />
                 
@@ -316,7 +279,7 @@ export function PoliciesPage() {
                       type="password"
                       value={formData.restic_password}
                       onChange={(e) => setFormData({ ...formData, restic_password: e.target.value })}
-                      placeholder="留空将自动生成"
+                      placeholder="留空则不加密"
                     />
                   </div>
                 )}
@@ -428,7 +391,6 @@ export function PoliciesPage() {
                   </Button>
                 </div>
               </form>
-            )}
           </SheetContent>
         </Sheet>
       </div>
