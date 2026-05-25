@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,7 +32,7 @@ type AgentUpdater interface {
 type BackupRunnerFunc func(context.Context, executor.ExecutorConfig) executor.TaskResult
 type RestoreRunnerFunc func(context.Context, executor.ExecutorConfig, string, string, []string) error
 type SnapshotListRunnerFunc func(context.Context, executor.ExecutorConfig) ([]executor.SnapshotInfo, error)
-type SnapshotBrowseRunnerFunc func(context.Context, executor.ExecutorConfig, string) ([]executor.SnapshotFileEntry, error)
+type SnapshotBrowseRunnerFunc func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error)
 
 type policyScheduler interface {
 	Validate(schedule string) error
@@ -680,11 +681,14 @@ func runSnapshotList(ctx context.Context, cfg executor.ExecutorConfig) ([]execut
 	return runner.ListSnapshots(ctx)
 }
 
-func runSnapshotBrowse(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string) ([]executor.SnapshotFileEntry, error) {
+func runSnapshotBrowse(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, path string) ([]executor.SnapshotFileEntry, error) {
 	runner := executor.ResticRunner{
 		RcloneConfPath: filepath.Join(cfg.ConfigDir, "rclone.conf"),
 		PasswordFile:   filepath.Join(cfg.ConfigDir, ".restic-password"),
 		RepoPath:       cfg.RepoPath,
+	}
+	if path != "" {
+		return runner.LsSnapshot(ctx, snapshotID, path)
 	}
 	return runner.LsSnapshot(ctx, snapshotID)
 }
@@ -704,8 +708,12 @@ func (h *Handler) handleRestoreReq(msg protocol.Message) {
 
 	policyPayload, err := h.policyStore.LoadPolicy()
 	if err != nil {
-		log.Printf("load policy failed: %v", err)
-		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", req.SnapshotID, "load policy: "+err.Error(), startedAt))
+		if os.IsNotExist(err) {
+			h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", req.SnapshotID, "no backup policy configured for this agent", startedAt))
+		} else {
+			log.Printf("load policy failed: %v", err)
+			h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", req.SnapshotID, "load policy: "+err.Error(), startedAt))
+		}
 		return
 	}
 	agentID := policyPayload.AgentID
@@ -767,8 +775,12 @@ func (h *Handler) handleSnapshotListReq(msg protocol.Message) {
 
 	policyPayload, err := h.policyStore.LoadPolicy()
 	if err != nil {
-		log.Printf("load policy failed: %v", err)
-		h.sendSnapshotListResp(msg.ID, agentID, nil, "load policy: "+err.Error())
+		if os.IsNotExist(err) {
+			h.sendSnapshotListResp(msg.ID, agentID, nil, "no backup policy configured for this agent")
+		} else {
+			log.Printf("load policy failed: %v", err)
+			h.sendSnapshotListResp(msg.ID, agentID, nil, "load policy: "+err.Error())
+		}
 		return
 	}
 	if agentID == "" {
@@ -814,15 +826,23 @@ func (h *Handler) handleSnapshotBrowseReq(msg protocol.Message) {
 
 	policyPayload, err := h.policyStore.LoadPolicy()
 	if err != nil {
-		log.Printf("load policy failed: %v", err)
-		h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, nil, "load policy: "+err.Error())
+		if os.IsNotExist(err) {
+			h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, nil, "no backup policy configured for this agent")
+		} else {
+			log.Printf("load policy failed: %v", err)
+			h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, nil, "load policy: "+err.Error())
+		}
 		return
 	}
 
-	entries, err := h.snapshotBrowseRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID)
+	entries, err := h.snapshotBrowseRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID, req.Path)
 	if err != nil {
 		h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, nil, err.Error())
 		return
+	}
+
+	if req.Path != "" {
+		entries = filterDirectChildren(entries, req.Path)
 	}
 
 	protoEntries := make([]protocol.SnapshotFileEntry, len(entries))
@@ -862,6 +882,22 @@ func (h *Handler) sendSnapshotBrowseResp(messageID string, snapshotID string, en
 	if err := h.sendMessage(*msg); err != nil {
 		log.Printf("send snapshot browse response failed: %v", err)
 	}
+}
+
+func filterDirectChildren(entries []executor.SnapshotFileEntry, parentPath string) []executor.SnapshotFileEntry {
+	prefix := strings.TrimSuffix(parentPath, "/") + "/"
+	var result []executor.SnapshotFileEntry
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Path, prefix) {
+			continue
+		}
+		rest := e.Path[len(prefix):]
+		if rest == "" || strings.Contains(rest, "/") {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
 }
 
 func (h *Handler) handleCollectLogsReq(msg protocol.Message) {

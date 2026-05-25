@@ -851,7 +851,7 @@ func TestHandleRestoreMissingPolicySendsFailedTaskResult(t *testing.T) {
 	assert.Equal(t, "agent-1", result.AgentID)
 	assert.Equal(t, "restore", result.TaskType)
 	assert.Equal(t, "failed", result.Status)
-	assert.Contains(t, result.ErrorLog, "load policy")
+	assert.Contains(t, result.ErrorLog, "no backup policy configured")
 }
 
 func TestHandleSnapshotListInvokesRunnerAndSendsResponseWithSameID(t *testing.T) {
@@ -919,7 +919,7 @@ func TestHandleSnapshotListMissingPolicySendsErrorPayload(t *testing.T) {
 	payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&messages[0])
 	require.NoError(t, err)
 	assert.Equal(t, "agent-1", payload.AgentID)
-	assert.Contains(t, payload.Error, "load policy")
+	assert.Contains(t, payload.Error, "no backup policy configured")
 	assert.Nil(t, payload.Snapshots)
 }
 
@@ -942,7 +942,7 @@ func TestHandleSnapshotBrowseInvokesRunnerAndSendsResponseWithSameID(t *testing.
 		PolicyStore: store,
 		ConfigDir:   configDir,
 		SendFunc:    sent.send,
-		SnapshotBrowseRunner: func(_ context.Context, cfg executor.ExecutorConfig, snapshotID string) ([]executor.SnapshotFileEntry, error) {
+		SnapshotBrowseRunner: func(_ context.Context, cfg executor.ExecutorConfig, snapshotID string, _ string) ([]executor.SnapshotFileEntry, error) {
 			runnerConfig = cfg
 			runnerSnapshotID = snapshotID
 			return []executor.SnapshotFileEntry{
@@ -990,7 +990,7 @@ func TestHandleSnapshotBrowseRunnerFailureSendsErrorPayload(t *testing.T) {
 		PolicyStore: store,
 		ConfigDir:   t.TempDir(),
 		SendFunc:    sent.send,
-		SnapshotBrowseRunner: func(context.Context, executor.ExecutorConfig, string) ([]executor.SnapshotFileEntry, error) {
+		SnapshotBrowseRunner: func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error) {
 			return nil, errors.New("browse failed")
 		},
 	})
@@ -1023,7 +1023,7 @@ func TestHandleSnapshotBrowseResponseTooLargeSendsErrorPayload(t *testing.T) {
 		PolicyStore: store,
 		ConfigDir:   t.TempDir(),
 		SendFunc:    sent.send,
-		SnapshotBrowseRunner: func(context.Context, executor.ExecutorConfig, string) ([]executor.SnapshotFileEntry, error) {
+		SnapshotBrowseRunner: func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error) {
 			return []executor.SnapshotFileEntry{
 				{Path: "/" + strings.Repeat("a", maxSnapshotBrowseResponseBytes), Type: "file"},
 			}, nil
