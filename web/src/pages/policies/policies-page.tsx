@@ -81,7 +81,7 @@ export function PoliciesPage() {
     exclude_patterns: ["/tmp", "/proc", "/sys", "/dev"],
     schedule: "0 2 * * *",
     retention: {
-      keep_last: 7,
+      keep_last: 10,
       keep_daily: 7,
       keep_weekly: 4,
       keep_monthly: 6,
