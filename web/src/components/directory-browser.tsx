@@ -125,9 +125,7 @@ export function DirectoryBrowser({
   );
 
   const handleToggle = useCallback(
-    async (path: string) => {
-      let needsFetch = false;
-
+    (path: string) => {
       setNodes((prev) => {
         const node = findNode(prev, path);
         if (!node || node.entry.type !== "dir") return prev;
@@ -147,41 +145,42 @@ export function DirectoryBrowser({
         }
 
         if (inflightRef.current.has(path)) {
-          return prev;
+          return updateNodeAtPath(prev, path, (n) => ({
+            ...n,
+            expanded: true,
+          }));
         }
 
-        needsFetch = true;
         inflightRef.current.add(path);
+        fetchChildren(path)
+          .then((entries) => {
+            setNodes((p) =>
+              updateNodeAtPath(p, path, (n) => ({
+                ...n,
+                children: entriesToNodes(entries),
+                loading: false,
+              }))
+            );
+          })
+          .catch((err: any) => {
+            setNodes((p) =>
+              updateNodeAtPath(p, path, (n) => ({
+                ...n,
+                loading: false,
+                error: err?.message || "加载失败",
+              }))
+            );
+          })
+          .finally(() => {
+            inflightRef.current.delete(path);
+          });
+
         return updateNodeAtPath(prev, path, (n) => ({
           ...n,
           loading: true,
           expanded: true,
         }));
       });
-
-      if (needsFetch) {
-        try {
-          const entries = await fetchChildren(path);
-          const children = entriesToNodes(entries);
-          setNodes((prev) =>
-            updateNodeAtPath(prev, path, (n) => ({
-              ...n,
-              children,
-              loading: false,
-            }))
-          );
-        } catch (err: any) {
-          setNodes((prev) =>
-            updateNodeAtPath(prev, path, (n) => ({
-              ...n,
-              loading: false,
-              error: err?.message || "加载失败",
-            }))
-          );
-        } finally {
-          inflightRef.current.delete(path);
-        }
-      }
     },
     [fetchChildren, updateNodeAtPath]
   );
