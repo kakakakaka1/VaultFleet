@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"gopkg.in/yaml.v3"
@@ -15,6 +16,7 @@ import (
 	"vaultfleet/internal/agent/connect"
 	enrollpkg "vaultfleet/internal/agent/enroll"
 	"vaultfleet/internal/agent/policy"
+	"vaultfleet/internal/agent/selfupdate"
 	"vaultfleet/pkg/protocol"
 )
 
@@ -23,9 +25,11 @@ const defaultConfigPath = "/etc/vaultfleet/agent.yaml"
 var version string
 
 type AgentConfig struct {
-	Server     string `yaml:"server"`
-	AgentID    string `yaml:"agent_id"`
-	AgentToken string `yaml:"agent_token"`
+	Server      string `yaml:"server"`
+	AgentID     string `yaml:"agent_id"`
+	AgentToken  string `yaml:"agent_token"`
+	AutoUpdate  *bool  `yaml:"auto_update,omitempty"`
+	GitHubProxy string `yaml:"github_proxy,omitempty"`
 }
 
 func main() {
@@ -88,6 +92,19 @@ func runAgent(ctx context.Context, args []string, runtime agentRuntime) error {
 
 func runClient(ctx context.Context, cfg *AgentConfig) error {
 	store := policy.NewStore("")
+	var updater *selfupdate.Updater
+	if cfg.AutoUpdate == nil || *cfg.AutoUpdate {
+		execPath, err := os.Executable()
+		if err == nil {
+			updater = selfupdate.NewUpdater(selfupdate.Config{
+				CurrentVersion: version,
+				BinaryPath:     execPath,
+				GitHubRepo:     "momo-z/VaultFleet",
+				GitHubProxy:    cfg.GitHubProxy,
+				Arch:           runtime.GOARCH,
+			})
+		}
+	}
 	var client *connect.Client
 	handler := agenthandler.NewHandler(agenthandler.HandlerConfig{
 		PolicyStore: store,
@@ -95,6 +112,8 @@ func runClient(ctx context.Context, cfg *AgentConfig) error {
 		SendFunc: func(msg protocol.Message) error {
 			return client.Send(msg)
 		},
+		AgentVersion: version,
+		Updater:      updater,
 	})
 	collector := func() connect.SystemInfo {
 		info := connect.DefaultSystemInfoCollector()

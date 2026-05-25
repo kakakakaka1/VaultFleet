@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -78,4 +79,27 @@ func TestRunAgentHelpReturnsNil(t *testing.T) {
 	err := runAgent(context.Background(), []string{"--help"}, agentRuntime{})
 
 	require.NoError(t, err)
+}
+
+func TestAgentConfigAutoUpdateDefault(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "agent.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("server: https://master\nagent_id: a1\nagent_token: tok\n"), 0600))
+
+	cfg, err := loadConfig(configPath)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.AutoUpdate)
+	assert.Empty(t, cfg.GitHubProxy)
+}
+
+func TestAgentConfigAutoUpdateDisabled(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "agent.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("server: https://master\nagent_id: a1\nagent_token: tok\nauto_update: false\ngithub_proxy: https://proxy.example.com\n"), 0600))
+
+	cfg, err := loadConfig(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.AutoUpdate)
+	assert.False(t, *cfg.AutoUpdate)
+	assert.Equal(t, "https://proxy.example.com", cfg.GitHubProxy)
 }
