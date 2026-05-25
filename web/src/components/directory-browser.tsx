@@ -1,9 +1,18 @@
-import { useState, useCallback } from "react";
-import { useMutation } from "@tanstack/react-query";
-import { browseAgent } from "@/services/agents";
+import { useState, useCallback, useRef } from "react";
+import { browseAgent, dirSizeAgent } from "@/services/agents";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Folder, FolderOpen, ChevronRight, ChevronDown, Home, RefreshCw, AlertCircle } from "lucide-react";
+import {
+  Folder,
+  FolderOpen,
+  FileText,
+  ChevronRight,
+  ChevronDown,
+  Home,
+  RefreshCw,
+  AlertCircle,
+  Ruler,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -25,25 +34,63 @@ interface TreeNode {
   error?: string;
 }
 
-export function DirectoryBrowser({ agentId, onSelect, onDeselect, selectedPaths = [], className }: DirectoryBrowserProps) {
+function sortEntries(entries: BrowseEntry[]): BrowseEntry[] {
+  return [...entries].sort((a, b) => {
+    if (a.type !== b.type) {
+      return a.type === "dir" ? -1 : 1;
+    }
+    return a.path.localeCompare(b.path);
+  });
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function entriesToNodes(entries: BrowseEntry[]): TreeNode[] {
+  return sortEntries(entries).map((e) => ({
+    entry: e,
+    children: null,
+    loading: false,
+    expanded: false,
+  }));
+}
+
+export function DirectoryBrowser({
+  agentId,
+  onSelect,
+  onDeselect,
+  selectedPaths = [],
+  className,
+}: DirectoryBrowserProps) {
   const [nodes, setNodes] = useState<TreeNode[]>([]);
   const [rootLoading, setRootLoading] = useState(true);
   const [rootError, setRootError] = useState<string | null>(null);
+  const inflightRef = useRef<Set<string>>(new Set());
+  const [dirSizes, setDirSizes] = useState<
+    Map<string, number | "loading" | "error">
+  >(new Map());
 
-  const fetchChildren = useCallback(async (path: string): Promise<BrowseEntry[]> => {
-    const resp = await browseAgent(agentId, { path, depth: 1 });
-    return resp.entries || [];
-  }, [agentId]);
+  const fetchChildren = useCallback(
+    async (path: string): Promise<BrowseEntry[]> => {
+      const resp = await browseAgent(agentId, { path, depth: 1 });
+      return resp.entries || [];
+    },
+    [agentId]
+  );
 
   const loadRoot = useCallback(async () => {
     setRootLoading(true);
     setRootError(null);
+    setDirSizes(new Map());
     try {
       const entries = await fetchChildren("/");
-      setNodes(entries
-        .filter(e => e.type === "dir")
-        .map(e => ({ entry: e, children: null, loading: false, expanded: false }))
-      );
+      setNodes(entriesToNodes(entries));
     } catch (err: any) {
       setRootError(err?.message || "加载失败");
     } finally {
@@ -51,74 +98,157 @@ export function DirectoryBrowser({ agentId, onSelect, onDeselect, selectedPaths 
     }
   }, [fetchChildren]);
 
-  useState(() => { loadRoot(); });
+  useState(() => {
+    loadRoot();
+  });
 
-  const updateNodeAtPath = useCallback((
-    nodeList: TreeNode[],
-    targetPath: string,
-    updater: (node: TreeNode) => TreeNode
-  ): TreeNode[] => {
-    return nodeList.map(node => {
-      if (node.entry.path === targetPath) {
-        return updater(node);
+  const updateNodeAtPath = useCallback(
+    (
+      nodeList: TreeNode[],
+      targetPath: string,
+      updater: (node: TreeNode) => TreeNode
+    ): TreeNode[] => {
+      return nodeList.map((node) => {
+        if (node.entry.path === targetPath) {
+          return updater(node);
+        }
+        if (node.children && targetPath.startsWith(node.entry.path + "/")) {
+          return {
+            ...node,
+            children: updateNodeAtPath(node.children, targetPath, updater),
+          };
+        }
+        return node;
+      });
+    },
+    []
+  );
+
+  const handleToggle = useCallback(
+    async (path: string) => {
+      let needsFetch = false;
+
+      setNodes((prev) => {
+        const node = findNode(prev, path);
+        if (!node || node.entry.type !== "dir") return prev;
+
+        if (node.expanded) {
+          return updateNodeAtPath(prev, path, (n) => ({
+            ...n,
+            expanded: false,
+          }));
+        }
+
+        if (node.children !== null) {
+          return updateNodeAtPath(prev, path, (n) => ({
+            ...n,
+            expanded: true,
+          }));
+        }
+
+        if (inflightRef.current.has(path)) {
+          return prev;
+        }
+
+        needsFetch = true;
+        inflightRef.current.add(path);
+        return updateNodeAtPath(prev, path, (n) => ({
+          ...n,
+          loading: true,
+          expanded: true,
+        }));
+      });
+
+      if (needsFetch) {
+        try {
+          const entries = await fetchChildren(path);
+          const children = entriesToNodes(entries);
+          setNodes((prev) =>
+            updateNodeAtPath(prev, path, (n) => ({
+              ...n,
+              children,
+              loading: false,
+            }))
+          );
+        } catch (err: any) {
+          setNodes((prev) =>
+            updateNodeAtPath(prev, path, (n) => ({
+              ...n,
+              loading: false,
+              error: err?.message || "加载失败",
+            }))
+          );
+        } finally {
+          inflightRef.current.delete(path);
+        }
       }
-      if (node.children && targetPath.startsWith(node.entry.path + "/")) {
-        return { ...node, children: updateNodeAtPath(node.children, targetPath, updater) };
+    },
+    [fetchChildren, updateNodeAtPath]
+  );
+
+  const handleCheck = useCallback(
+    (path: string, checked: boolean) => {
+      if (checked) {
+        onSelect(path);
+      } else {
+        onDeselect?.(path);
       }
-      return node;
-    });
-  }, []);
+    },
+    [onSelect, onDeselect]
+  );
 
-  const handleToggle = useCallback(async (path: string) => {
-    let needsFetch = false;
+  const isSelected = useCallback(
+    (path: string) => {
+      return selectedPaths.includes(path);
+    },
+    [selectedPaths]
+  );
 
-    setNodes(prev => {
-      const node = findNode(prev, path);
-      if (!node) return prev;
-
-      if (node.expanded) {
-        return updateNodeAtPath(prev, path, n => ({ ...n, expanded: false }));
-      }
-
-      if (node.children !== null) {
-        return updateNodeAtPath(prev, path, n => ({ ...n, expanded: true }));
-      }
-
-      needsFetch = true;
-      return updateNodeAtPath(prev, path, n => ({ ...n, loading: true, expanded: true }));
-    });
-
-    if (needsFetch) {
+  const handleCalcSize = useCallback(
+    async (path: string) => {
+      setDirSizes((prev) => {
+        const next = new Map(prev);
+        next.set(path, "loading");
+        return next;
+      });
       try {
-        const entries = await fetchChildren(path);
-        const children = entries
-          .filter(e => e.type === "dir")
-          .map(e => ({ entry: e, children: null, loading: false, expanded: false } as TreeNode));
-        setNodes(prev => updateNodeAtPath(prev, path, n => ({ ...n, children, loading: false })));
-      } catch (err: any) {
-        setNodes(prev => updateNodeAtPath(prev, path, n => ({
-          ...n, loading: false, error: err?.message || "加载失败"
-        })));
+        const resp = await dirSizeAgent(agentId, { path });
+        if (resp.error) {
+          setDirSizes((prev) => {
+            const next = new Map(prev);
+            next.set(path, "error");
+            return next;
+          });
+        } else {
+          setDirSizes((prev) => {
+            const next = new Map(prev);
+            next.set(path, resp.size);
+            return next;
+          });
+        }
+      } catch {
+        setDirSizes((prev) => {
+          const next = new Map(prev);
+          next.set(path, "error");
+          return next;
+        });
       }
-    }
-  }, [fetchChildren, updateNodeAtPath]);
-
-  const handleCheck = useCallback((path: string, checked: boolean) => {
-    if (checked) {
-      onSelect(path);
-    } else {
-      onDeselect?.(path);
-    }
-  }, [onSelect, onDeselect]);
-
-  const isSelected = useCallback((path: string) => {
-    return selectedPaths.includes(path);
-  }, [selectedPaths]);
+    },
+    [agentId]
+  );
 
   return (
-    <div className={cn("border rounded-md bg-card overflow-hidden", className)}>
+    <div
+      className={cn("border rounded-md bg-card overflow-hidden", className)}
+    >
       <div className="bg-muted/50 p-2 flex items-center gap-2 border-b">
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={loadRoot} disabled={rootLoading}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          onClick={loadRoot}
+          disabled={rootLoading}
+        >
           <Home className="h-4 w-4" />
         </Button>
         <div className="flex-1 text-xs font-mono truncate px-2 py-1 bg-background border rounded">
@@ -131,7 +261,9 @@ export function DirectoryBrowser({ agentId, onSelect, onDeselect, selectedPaths 
           onClick={loadRoot}
           disabled={rootLoading}
         >
-          <RefreshCw className={cn("h-4 w-4", rootLoading && "animate-spin")} />
+          <RefreshCw
+            className={cn("h-4 w-4", rootLoading && "animate-spin")}
+          />
         </Button>
       </div>
 
@@ -153,10 +285,12 @@ export function DirectoryBrowser({ agentId, onSelect, onDeselect, selectedPaths 
             ))}
           </div>
         ) : nodes.length === 0 ? (
-          <div className="p-8 text-center text-muted-foreground text-sm">目录为空</div>
+          <div className="p-8 text-center text-muted-foreground text-sm">
+            目录为空
+          </div>
         ) : (
           <div className="py-1">
-            {nodes.map(node => (
+            {nodes.map((node) => (
               <TreeNodeRow
                 key={node.entry.path}
                 node={node}
@@ -164,6 +298,8 @@ export function DirectoryBrowser({ agentId, onSelect, onDeselect, selectedPaths 
                 isSelected={isSelected}
                 onToggle={handleToggle}
                 onCheck={handleCheck}
+                onCalcSize={handleCalcSize}
+                dirSizes={dirSizes}
               />
             ))}
           </div>
@@ -179,15 +315,22 @@ function TreeNodeRow({
   isSelected,
   onToggle,
   onCheck,
+  onCalcSize,
+  dirSizes,
 }: {
   node: TreeNode;
   depth: number;
   isSelected: (path: string) => boolean;
   onToggle: (path: string) => void;
   onCheck: (path: string, checked: boolean) => void;
+  onCalcSize: (path: string) => void;
+  dirSizes: Map<string, number | "loading" | "error">;
 }) {
   const checked = isSelected(node.entry.path);
-  const name = node.entry.path.split("/").filter(Boolean).pop() || node.entry.path;
+  const name =
+    node.entry.path.split("/").filter(Boolean).pop() || node.entry.path;
+  const isDir = node.entry.type === "dir";
+  const dirSize = isDir ? dirSizes.get(node.entry.path) : undefined;
 
   return (
     <>
@@ -195,31 +338,73 @@ function TreeNodeRow({
         className="flex items-center gap-1 px-2 py-1.5 hover:bg-muted/50 group"
         style={{ paddingLeft: `${depth * 20 + 8}px` }}
       >
-        <button
-          type="button"
-          className="h-5 w-5 flex items-center justify-center shrink-0 text-muted-foreground hover:text-foreground rounded"
-          onClick={() => onToggle(node.entry.path)}
-        >
-          {node.loading ? (
-            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-          ) : node.expanded ? (
-            <ChevronDown className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5" />
-          )}
-        </button>
+        {isDir ? (
+          <button
+            type="button"
+            className="h-5 w-5 flex items-center justify-center shrink-0 text-muted-foreground hover:text-foreground rounded"
+            onClick={() => onToggle(node.entry.path)}
+          >
+            {node.loading ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : node.expanded ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
+          </button>
+        ) : (
+          <span className="h-5 w-5 shrink-0" />
+        )}
 
         <div
-          className="flex items-center gap-1.5 flex-1 min-w-0 cursor-pointer"
-          onClick={() => onToggle(node.entry.path)}
+          className={cn(
+            "flex items-center gap-1.5 flex-1 min-w-0",
+            isDir && "cursor-pointer"
+          )}
+          onClick={isDir ? () => onToggle(node.entry.path) : undefined}
         >
-          {node.expanded ? (
-            <FolderOpen className="h-4 w-4 text-blue-500 fill-blue-500/20 shrink-0" />
+          {isDir ? (
+            node.expanded ? (
+              <FolderOpen className="h-4 w-4 text-blue-500 fill-blue-500/20 shrink-0" />
+            ) : (
+              <Folder className="h-4 w-4 text-blue-500 fill-blue-500/20 shrink-0" />
+            )
           ) : (
-            <Folder className="h-4 w-4 text-blue-500 fill-blue-500/20 shrink-0" />
+            <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
           )}
           <span className="text-sm truncate select-none">{name}</span>
         </div>
+
+        {!isDir && node.entry.size > 0 && (
+          <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+            {formatSize(node.entry.size)}
+          </span>
+        )}
+
+        {isDir && dirSize === undefined && (
+          <button
+            type="button"
+            className="h-5 w-5 flex items-center justify-center shrink-0 text-muted-foreground hover:text-foreground rounded opacity-0 group-hover:opacity-100 transition-opacity"
+            onClick={(e) => {
+              e.stopPropagation();
+              onCalcSize(node.entry.path);
+            }}
+            title="计算目录大小"
+          >
+            <Ruler className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {isDir && dirSize === "loading" && (
+          <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground shrink-0" />
+        )}
+        {isDir && dirSize === "error" && (
+          <span className="text-xs text-destructive shrink-0">错误</span>
+        )}
+        {isDir && typeof dirSize === "number" && (
+          <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+            {formatSize(dirSize)}
+          </span>
+        )}
 
         <Checkbox
           checked={checked}
@@ -237,25 +422,31 @@ function TreeNodeRow({
         </div>
       )}
 
-      {node.expanded && node.children && node.children.length === 0 && !node.loading && (
-        <div
-          className="text-xs text-muted-foreground px-2 py-1"
-          style={{ paddingLeft: `${(depth + 1) * 20 + 8}px` }}
-        >
-          无子目录
-        </div>
-      )}
+      {node.expanded &&
+        node.children &&
+        node.children.length === 0 &&
+        !node.loading && (
+          <div
+            className="text-xs text-muted-foreground px-2 py-1"
+            style={{ paddingLeft: `${(depth + 1) * 20 + 8}px` }}
+          >
+            空目录
+          </div>
+        )}
 
-      {node.expanded && node.children?.map(child => (
-        <TreeNodeRow
-          key={child.entry.path}
-          node={child}
-          depth={depth + 1}
-          isSelected={isSelected}
-          onToggle={onToggle}
-          onCheck={onCheck}
-        />
-      ))}
+      {node.expanded &&
+        node.children?.map((child) => (
+          <TreeNodeRow
+            key={child.entry.path}
+            node={child}
+            depth={depth + 1}
+            isSelected={isSelected}
+            onToggle={onToggle}
+            onCheck={onCheck}
+            onCalcSize={onCalcSize}
+            dirSizes={dirSizes}
+          />
+        ))}
     </>
   );
 }
