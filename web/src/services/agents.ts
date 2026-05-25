@@ -1,5 +1,5 @@
 import { Agent, ApiAgent, CreateAgentResponse } from "@/types/agent";
-import { BrowseRequest, BrowseResponse } from "@/types/api";
+import { BrowseRequest, BrowseResponse, DirSizeRequest, DirSizeResponse } from "@/types/api";
 import { apiDelete, apiGet, apiPost } from "./http";
 
 export const listAgents = async () => (await apiGet<ApiAgent[]>("/api/agents")).map(normalizeAgent);
@@ -9,6 +9,7 @@ export const deleteAgent = (id: string) => apiDelete(`/api/agents/${id}`);
 export const regenerateAgentToken = (id: string) => apiPost<CreateAgentResponse>(`/api/agents/${id}/regenerate-token`);
 export const getInstallToken = (id: string) => apiGet<{ id: string; enroll_token: string; enrolled: boolean }>(`/api/agents/${id}/install-token`);
 export const browseAgent = (id: string, body: BrowseRequest) => apiPost<BrowseResponse>(`/api/agents/${id}/browse`, body);
+export const dirSizeAgent = (id: string, body: DirSizeRequest) => apiPost<DirSizeResponse>(`/api/agents/${id}/dir-size`, body);
 export const backupNow = (id: string) => apiPost<{ command_id: string; message_id: string }>(`/api/agents/${id}/backup-now`);
 
 export function normalizeAgent(agent: ApiAgent): Agent {

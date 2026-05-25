@@ -35,3 +35,13 @@ export interface BrowseResponse {
   path: string;
   entries: BrowseEntry[];
 }
+
+export interface DirSizeRequest {
+  path: string;
+}
+
+export interface DirSizeResponse {
+  path: string;
+  size: number;
+  error?: string;
+}
