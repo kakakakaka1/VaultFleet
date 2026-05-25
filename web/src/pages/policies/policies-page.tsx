@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Plus, ShieldCheck, Settings2, Trash2, MoreHorizontal, Check, Play } from "lucide-react";
+import { Plus, Settings2, Trash2, MoreHorizontal, Play, ChevronDown } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -53,6 +53,94 @@ const RETENTION_PRESETS: Record<string, { label: string; description: string; va
   },
 };
 
+const RCLONE_ARG_FIELDS = [
+  {
+    key: "transfers",
+    label: "并发传输数",
+    description: "同时上传的文件数",
+    defaultValue: "4",
+    webdavValue: "2",
+  },
+  {
+    key: "tpslimit",
+    label: "每秒请求数",
+    description: "限制每秒 HTTP 请求数，0 = 不限",
+    defaultValue: "0",
+    webdavValue: "4",
+  },
+  {
+    key: "retries",
+    label: "重试次数",
+    description: "失败后重试次数",
+    defaultValue: "3",
+    webdavValue: "10",
+  },
+  {
+    key: "retries-sleep",
+    label: "重试间隔",
+    description: "重试之间的等待时间（如 10s）",
+    defaultValue: "0",
+    webdavValue: "10s",
+  },
+  {
+    key: "low-level-retries",
+    label: "底层重试",
+    description: "底层 IO 错误重试次数",
+    defaultValue: "10",
+    webdavValue: "20",
+  },
+  {
+    key: "timeout",
+    label: "请求超时",
+    description: "单次 HTTP 请求超时（如 5m0s）",
+    defaultValue: "5m0s",
+    webdavValue: "10m0s",
+  },
+] as const;
+
+function defaultPolicyInput(): PolicyInput {
+  return {
+    agent_id: "",
+    storage_id: "",
+    repo_path: "",
+    restic_password: "",
+    backup_dirs: [],
+    exclude_patterns: ["/tmp", "/proc", "/sys", "/dev"],
+    schedule: "0 2 * * *",
+    retention: {
+      keep_last: 10,
+      keep_daily: 7,
+      keep_weekly: 4,
+      keep_monthly: 6,
+    },
+    rclone_args: {},
+  };
+}
+
+export function defaultRcloneArgs(storageType: string): Record<string, string> {
+  if (storageType.toLowerCase() !== "webdav") {
+    return {};
+  }
+  return Object.fromEntries(RCLONE_ARG_FIELDS.map((field) => [field.key, field.webdavValue]));
+}
+
+export function cleanRcloneArgs(args?: Record<string, string>): Record<string, string> | undefined {
+  const cleaned = Object.fromEntries(
+    Object.entries(args ?? {})
+      .map(([key, value]) => [key, value.trim()] as const)
+      .filter(([, value]) => value.length > 0),
+  );
+  return Object.keys(cleaned).length > 0 ? cleaned : undefined;
+}
+
+export function submitRcloneArgs(args: Record<string, string> | undefined, clearWhenEmpty: boolean): Record<string, string> | undefined {
+  const cleaned = cleanRcloneArgs(args);
+  if (cleaned || !clearWhenEmpty) {
+    return cleaned;
+  }
+  return {};
+}
+
 function detectRetentionPreset(retention: RetentionConfig): string {
   for (const [key, preset] of Object.entries(RETENTION_PRESETS)) {
     if (key === "custom") continue;
@@ -71,30 +159,25 @@ export function PoliciesPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmBackupAgentId, setConfirmBackupAgentId] = useState<string | null>(null);
   const [retentionPreset, setRetentionPreset] = useState("standard");
+  const [advancedTransferOpen, setAdvancedTransferOpen] = useState(false);
 
-  const [formData, setFormData] = useState<PolicyInput>({
-    agent_id: "",
-    storage_id: "",
-    repo_path: "",
-    restic_password: "",
-    backup_dirs: [],
-    exclude_patterns: ["/tmp", "/proc", "/sys", "/dev"],
-    schedule: "0 2 * * *",
-    retention: {
-      keep_last: 10,
-      keep_daily: 7,
-      keep_weekly: 4,
-      keep_monthly: 6,
-    },
-  });
+  const [formData, setFormData] = useState<PolicyInput>(() => defaultPolicyInput());
 
   const { data: policies, isLoading } = useQuery({ queryKey: ["policies"], queryFn: () => listPolicies() });
   const { data: agents } = useQuery({ queryKey: ["agents"], queryFn: listAgents });
   const { data: storageList } = useQuery({ queryKey: ["storage"], queryFn: listStorage });
 
+  const resetPolicyFormState = () => {
+    setEditingId(null);
+    setFormData(defaultPolicyInput());
+    setRetentionPreset("standard");
+    setAdvancedTransferOpen(false);
+  };
+
   const createMutation = useMutation({
     mutationFn: createPolicy,
     onSuccess: () => {
+      resetPolicyFormState();
       setIsDrawerOpen(false);
       queryClient.invalidateQueries({ queryKey: ["policies"] });
       toast.success("策略已创建");
@@ -107,6 +190,7 @@ export function PoliciesPage() {
   const updateMutation = useMutation({
     mutationFn: (data: PolicyInput) => updatePolicy(editingId!, data),
     onSuccess: () => {
+      resetPolicyFormState();
       setIsDrawerOpen(false);
       queryClient.invalidateQueries({ queryKey: ["policies"] });
       toast.success("策略已更新");
@@ -158,34 +242,29 @@ export function PoliciesPage() {
       exclude_patterns: policy.exclude_patterns,
       schedule: policy.schedule,
       retention: policy.retention,
+      rclone_args: policy.rclone_args || {},
     });
     setRetentionPreset(detectRetentionPreset(policy.retention));
+    setAdvancedTransferOpen(!!cleanRcloneArgs(policy.rclone_args));
     setIsDrawerOpen(true);
   };
 
   const handleDrawerClose = (open: boolean) => {
     setIsDrawerOpen(open);
     if (!open) {
-      setEditingId(null);
-      setFormData({
-        agent_id: "",
-        storage_id: "",
-        repo_path: "",
-        restic_password: "",
-        backup_dirs: [],
-        exclude_patterns: ["/tmp", "/proc", "/sys", "/dev"],
-        schedule: "0 2 * * *",
-        retention: { keep_last: 7, keep_daily: 7, keep_weekly: 4, keep_monthly: 6 },
-      });
+      resetPolicyFormState();
       createMutation.reset();
       updateMutation.reset();
-      setRetentionPreset("standard");
     }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const submitData = { ...formData, repo_path: "vaultfleet/" + formData.repo_path };
+    const submitData = {
+      ...formData,
+      repo_path: "vaultfleet/" + formData.repo_path,
+      rclone_args: submitRcloneArgs(formData.rclone_args, !!editingId),
+    };
     if (editingId) {
       updateMutation.mutate(submitData);
     } else {
@@ -242,7 +321,18 @@ export function PoliciesPage() {
                     <Label>选择存储</Label>
                     <Select 
                       value={formData.storage_id} 
-                      onValueChange={(val) => setFormData({ ...formData, storage_id: val })}
+                      onValueChange={(val) => {
+                        const storage = storageList?.find(s => s.id === val);
+                        const updates: Partial<PolicyInput> = { storage_id: val };
+                        if (!editingId && !cleanRcloneArgs(formData.rclone_args) && storage) {
+                          const defaults = defaultRcloneArgs(storage.rclone_type);
+                          updates.rclone_args = defaults;
+                          if (Object.keys(defaults).length > 0) {
+                            setAdvancedTransferOpen(true);
+                          }
+                        }
+                        setFormData({ ...formData, ...updates });
+                      }}
                       disabled={!!editingId}
                     >
                       <SelectTrigger><SelectValue placeholder="请选择存储" /></SelectTrigger>
@@ -385,6 +475,49 @@ export function PoliciesPage() {
                   {retentionPreset !== "custom" && (
                     <div className="text-xs text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
                       最近 {formData.retention.keep_last ?? 0} 个 · 每日 {formData.retention.keep_daily ?? 0} 份 · 每周 {formData.retention.keep_weekly ?? 0} 份 · 每月 {formData.retention.keep_monthly ?? 0} 份
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-3 border-t pt-4">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between text-left"
+                    onClick={() => setAdvancedTransferOpen((open) => !open)}
+                    aria-expanded={advancedTransferOpen}
+                    aria-controls="advanced-transfer-params"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Settings2 className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-sm font-medium">高级传输参数</span>
+                    </span>
+                    <ChevronDown
+                      className={`h-4 w-4 text-muted-foreground transition-transform ${advancedTransferOpen ? "rotate-180" : ""}`}
+                    />
+                  </button>
+
+                  {advancedTransferOpen && (
+                    <div id="advanced-transfer-params" className="grid grid-cols-1 gap-4 pt-1 sm:grid-cols-2">
+                      {RCLONE_ARG_FIELDS.map((field) => (
+                        <div key={field.key} className="space-y-1.5">
+                          <Label htmlFor={`rclone-${field.key}`} className="text-xs">{field.label}</Label>
+                          <Input
+                            id={`rclone-${field.key}`}
+                            value={formData.rclone_args?.[field.key] ?? ""}
+                            onChange={(e) => {
+                              setFormData({
+                                ...formData,
+                                rclone_args: {
+                                  ...(formData.rclone_args ?? {}),
+                                  [field.key]: e.target.value,
+                                },
+                              });
+                            }}
+                            placeholder={`默认 ${field.defaultValue} / WebDAV ${field.webdavValue}`}
+                          />
+                          <p className="text-[11px] text-muted-foreground">{field.description}</p>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>

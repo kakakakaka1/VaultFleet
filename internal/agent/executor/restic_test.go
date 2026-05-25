@@ -38,6 +38,127 @@ func TestBuildInitCmdIncludesRepoPasswordAndRcloneConfigEnv(t *testing.T) {
 	assertEnvContains(t, cmd.Env, "RCLONE_CONFIG=/tmp/rclone.conf")
 }
 
+func TestBaseArgsIncludesRcloneExtraArgs(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+		RcloneExtraArgs: map[string]string{
+			"transfers": "2",
+			"tpslimit":  "4",
+		},
+	}
+
+	cmd := runner.buildInitCmd()
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"init",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		pwFile,
+		"-o",
+		"rclone.args=serve restic --stdio --config /tmp/rclone.conf --tpslimit 4 --transfers 2",
+	})
+}
+
+func TestBaseArgsWithEmptyRcloneExtraArgsUnchanged(t *testing.T) {
+	tests := []struct {
+		name           string
+		rcloneExtraArg map[string]string
+	}{
+		{name: "nil"},
+		{name: "empty", rcloneExtraArg: map[string]string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pwFile := writeTempPasswordFile(t, "secret")
+			runner := ResticRunner{
+				RcloneConfPath:  "/tmp/rclone.conf",
+				PasswordFile:    pwFile,
+				RepoPath:        "repo",
+				RcloneExtraArgs: tt.rcloneExtraArg,
+			}
+
+			cmd := runner.buildInitCmd()
+
+			assertArgsEqual(t, cmd.Args, []string{
+				"restic",
+				"init",
+				"-r",
+				"rclone:vaultfleet:repo",
+				"--password-file",
+				pwFile,
+				"-o",
+				"rclone.args=serve restic --stdio --config /tmp/rclone.conf",
+			})
+		})
+	}
+}
+
+func TestBaseArgsSkipsUnsafeAndEmptyRcloneExtraArgs(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+		RcloneExtraArgs: map[string]string{
+			"transfers":          "2",
+			"timeout":            "",
+			"--tpslimit":         "4",
+			"s3-upload-cutoff":   "64M",
+			"low-level-retries":  "5",
+			"retries-sleep":      "10s",
+			"unknown-safe-shape": "ignored",
+		},
+	}
+
+	cmd := runner.buildInitCmd()
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"init",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		pwFile,
+		"-o",
+		"rclone.args=serve restic --stdio --config /tmp/rclone.conf --low-level-retries 5 --retries-sleep 10s --transfers 2",
+	})
+}
+
+func TestBaseArgsSkipsRcloneExtraArgsWithInvalidValues(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+		RcloneExtraArgs: map[string]string{
+			"transfers":         "2 --config /tmp/other.conf",
+			"tpslimit":          "4.5",
+			"retries":           "-1",
+			"retries-sleep":     "10s --stats 1s",
+			"low-level-retries": "20",
+			"timeout":           "10m0s",
+		},
+	}
+
+	cmd := runner.buildInitCmd()
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"init",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		pwFile,
+		"-o",
+		"rclone.args=serve restic --stdio --config /tmp/rclone.conf --low-level-retries 20 --timeout 10m0s --tpslimit 4.5",
+	})
+}
+
 func TestBuildInitCmdProvidesCacheDirWhenServiceEnvironmentOmitsHome(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CACHE_HOME", "")
@@ -69,6 +190,34 @@ func TestBuildBackupCmdIncludesExcludesAndDirectories(t *testing.T) {
 	assertArgsEqual(t, cmd.Args, []string{
 		"restic",
 		"backup",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		pwFile,
+		"-o",
+		"rclone.args=serve restic --stdio --config /tmp/rclone.conf",
+		"--exclude=*.tmp",
+		"--exclude=/home/alice/cache",
+		"/home/alice",
+		"/etc",
+	})
+	assertEnvContains(t, cmd.Env, "RCLONE_CONFIG=/tmp/rclone.conf")
+}
+
+func TestBuildBackupWithProgressCmdRequestsJSONAndIncludesExcludesAndDirectories(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	cmd := runner.buildBackupWithProgressCmd([]string{"/home/alice", "/etc"}, []string{"*.tmp", "/home/alice/cache"})
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"backup",
+		"--json",
 		"-r",
 		"rclone:vaultfleet:repo",
 		"--password-file",
@@ -374,6 +523,45 @@ func TestInitRepoCallsRcloneMkdirBeforeResticInit(t *testing.T) {
 	}
 }
 
+func TestInitRepoAppliesRcloneExtraArgsToRcloneMkdir(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFakeRclone(t, dir, fakeResticScript{})
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"snapshots": {Stderr: "Is there a repository at the following location?\n", Exit: 1},
+		"init":      {Stdout: "created restic repository\n"},
+	})
+	prependPath(t, dir)
+
+	runner := ResticRunner{
+		RcloneConfPath: filepath.Join(dir, "rclone.conf"),
+		PasswordFile:   filepath.Join(dir, ".restic-password"),
+		RepoPath:       "backups/node-1",
+		RcloneExtraArgs: map[string]string{
+			"transfers":        "2",
+			"tpslimit":         "4",
+			"retries":          "3",
+			"retries-sleep":    "10s",
+			"s3-upload-cutoff": "ignored",
+		},
+	}
+
+	if err := runner.InitRepo(context.Background()); err != nil {
+		t.Fatalf("InitRepo() error = %v, want nil", err)
+	}
+
+	logPath := filepath.Join(dir, "rclone.log")
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read rclone log: %v", err)
+	}
+	got := strings.TrimSpace(string(logData))
+	want := "--config " + filepath.Join(dir, "rclone.conf") + " --retries 3 --retries-sleep 10s --tpslimit 4 --transfers 2 mkdir vaultfleet:backups/node-1"
+	if got != want {
+		t.Fatalf("rclone called with %q, want %q", got, want)
+	}
+}
+
 func TestInitRepoReturnsErrorWhenRcloneMkdirFails(t *testing.T) {
 	dir := t.TempDir()
 
@@ -440,6 +628,121 @@ func TestRunBackupReturnsStdoutAndIncludesStderrOnFailure(t *testing.T) {
 			t.Fatalf("RunBackup() error = %q, want stderr included", err.Error())
 		}
 	})
+}
+
+func TestRunBackupWithProgressParsesStatusAndSummaryJSON(t *testing.T) {
+	dir := t.TempDir()
+	jsonl := `{"message_type":"status","percent_done":0.25,"total_files":8,"files_done":2,"total_bytes":4096,"bytes_done":1024,"current_files":["/data/a.txt","/data/b.txt"]}
+{"message_type":"status","percent_done":1,"total_files":8,"files_done":8,"total_bytes":4096,"bytes_done":4096,"current_files":["/data/done.txt"]}
+{"message_type":"summary","snapshot_id":"snap-abc123"}
+`
+	writeFakeRestic(t, dir, fakeResticScript{Stdout: jsonl})
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+	var updates []BackupProgress
+
+	snapshotID, err := runner.RunBackupWithProgress(context.Background(), []string{"/data"}, []string{"*.tmp"}, func(progress BackupProgress) {
+		updates = append(updates, progress)
+	})
+
+	if err != nil {
+		t.Fatalf("RunBackupWithProgress() error = %v", err)
+	}
+	if snapshotID != "snap-abc123" {
+		t.Fatalf("RunBackupWithProgress() snapshotID = %q, want snap-abc123", snapshotID)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("RunBackupWithProgress() emitted %d updates, want 2", len(updates))
+	}
+	if updates[0] != (BackupProgress{
+		PercentDone: 0.25,
+		TotalFiles:  8,
+		FilesDone:   2,
+		TotalBytes:  4096,
+		BytesDone:   1024,
+		CurrentFile: "/data/a.txt",
+	}) {
+		t.Fatalf("first progress update = %+v", updates[0])
+	}
+	if updates[1].PercentDone != 1 || updates[1].FilesDone != 8 || updates[1].BytesDone != 4096 || updates[1].CurrentFile != "/data/done.txt" {
+		t.Fatalf("second progress update = %+v, want completed update", updates[1])
+	}
+}
+
+func TestRunBackupWithProgressReturnsStderrOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeRestic(t, dir, fakeResticScript{Stderr: "backup failed for /data\n", Exit: 2})
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	_, err := runner.RunBackupWithProgress(context.Background(), []string{"/data"}, nil, func(BackupProgress) {})
+	if err == nil {
+		t.Fatal("RunBackupWithProgress() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "backup failed for /data") {
+		t.Fatalf("RunBackupWithProgress() error = %q, want stderr included", err.Error())
+	}
+}
+
+func TestRunBackupWithProgressIncludesJSONErrorOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	jsonl := `{"message_type":"error","error":"permission denied","during":"read","item":"/data/private.db"}
+`
+	writeFakeRestic(t, dir, fakeResticScript{Stdout: jsonl, Exit: 3})
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	_, err := runner.RunBackupWithProgress(context.Background(), []string{"/data"}, nil, nil)
+	if err == nil {
+		t.Fatal("RunBackupWithProgress() error = nil, want error")
+	}
+	for _, want := range []string{"permission denied", "read", "/data/private.db"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("RunBackupWithProgress() error = %q, want %q", err.Error(), want)
+		}
+	}
+}
+
+func TestRunBackupWithProgressIgnoresMalformedJSONLines(t *testing.T) {
+	dir := t.TempDir()
+	jsonl := `not json
+{"message_type":"summary","snapshot_id":"snap-ok"}
+`
+	writeFakeRestic(t, dir, fakeResticScript{Stdout: jsonl})
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	snapshotID, err := runner.RunBackupWithProgress(context.Background(), []string{"/data"}, nil, nil)
+	if err != nil {
+		t.Fatalf("RunBackupWithProgress() error = %v", err)
+	}
+	if snapshotID != "snap-ok" {
+		t.Fatalf("RunBackupWithProgress() snapshotID = %q, want snap-ok", snapshotID)
+	}
 }
 
 func TestListSnapshotsParsesResticJSON(t *testing.T) {

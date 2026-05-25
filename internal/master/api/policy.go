@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -28,36 +30,39 @@ func NewPolicyHandler(database *db.Database, eventBus *events.Bus) *PolicyHandle
 }
 
 type createPolicyRequest struct {
-	AgentID         string         `json:"agent_id" binding:"required"`
-	StorageID       string         `json:"storage_id" binding:"required"`
-	RepoPath        string         `json:"repo_path"`
-	ResticPassword  string         `json:"restic_password"`
-	BackupDirs      []string       `json:"backup_dirs" binding:"required"`
-	ExcludePatterns []string       `json:"exclude_patterns"`
-	Schedule        string         `json:"schedule" binding:"required"`
-	Retention       map[string]any `json:"retention" binding:"required"`
+	AgentID         string            `json:"agent_id" binding:"required"`
+	StorageID       string            `json:"storage_id" binding:"required"`
+	RepoPath        string            `json:"repo_path"`
+	ResticPassword  string            `json:"restic_password"`
+	BackupDirs      []string          `json:"backup_dirs" binding:"required"`
+	ExcludePatterns []string          `json:"exclude_patterns"`
+	Schedule        string            `json:"schedule" binding:"required"`
+	Retention       map[string]any    `json:"retention" binding:"required"`
+	RcloneArgs      map[string]string `json:"rclone_args"`
 }
 
 type updatePolicyRequest struct {
-	StorageID       string         `json:"storage_id"`
-	BackupDirs      []string       `json:"backup_dirs"`
-	ExcludePatterns []string       `json:"exclude_patterns"`
-	Schedule        string         `json:"schedule"`
-	Retention       map[string]any `json:"retention"`
+	StorageID       string            `json:"storage_id"`
+	BackupDirs      []string          `json:"backup_dirs"`
+	ExcludePatterns []string          `json:"exclude_patterns"`
+	Schedule        string            `json:"schedule"`
+	Retention       map[string]any    `json:"retention"`
+	RcloneArgs      map[string]string `json:"rclone_args"`
 }
 
 type policyResponse struct {
-	ID              string         `json:"id"`
-	AgentID         string         `json:"agent_id"`
-	StorageID       string         `json:"storage_id"`
-	RepoPath        string         `json:"repo_path"`
-	BackupDirs      []string       `json:"backup_dirs"`
-	ExcludePatterns []string       `json:"exclude_patterns"`
-	Schedule        string         `json:"schedule"`
-	Retention       map[string]any `json:"retention"`
-	Synced          bool           `json:"synced"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
+	ID              string            `json:"id"`
+	AgentID         string            `json:"agent_id"`
+	StorageID       string            `json:"storage_id"`
+	RepoPath        string            `json:"repo_path"`
+	BackupDirs      []string          `json:"backup_dirs"`
+	ExcludePatterns []string          `json:"exclude_patterns"`
+	Schedule        string            `json:"schedule"`
+	Retention       map[string]any    `json:"retention"`
+	RcloneArgs      map[string]string `json:"rclone_args"`
+	Synced          bool              `json:"synced"`
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
 }
 
 func RegisterPolicyRoutes(rg *gin.RouterGroup, h *PolicyHandler) {
@@ -102,6 +107,17 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 	if !ok {
 		return
 	}
+	rcloneArgs := ""
+	if len(request.RcloneArgs) > 0 {
+		normalizedRcloneArgs, ok := validatePolicyRcloneArgs(c, request.RcloneArgs)
+		if !ok {
+			return
+		}
+		rcloneArgs, ok = marshalPolicyJSON(c, normalizedRcloneArgs)
+		if !ok {
+			return
+		}
+	}
 
 	policy := db.BackupPolicy{
 		AgentID:         request.AgentID,
@@ -112,6 +128,7 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 		ExcludePatterns: excludePatterns,
 		Schedule:        request.Schedule,
 		Retention:       retention,
+		RcloneArgs:      rcloneArgs,
 		Synced:          false,
 	}
 
@@ -199,6 +216,17 @@ func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 			return
 		}
 		policy.Retention = retention
+	}
+	if request.RcloneArgs != nil {
+		normalizedRcloneArgs, ok := validatePolicyRcloneArgs(c, request.RcloneArgs)
+		if !ok {
+			return
+		}
+		rcloneArgs, ok := marshalPolicyJSON(c, normalizedRcloneArgs)
+		if !ok {
+			return
+		}
+		policy.RcloneArgs = rcloneArgs
 	}
 
 	policy.Synced = false
@@ -312,6 +340,11 @@ func newPolicyResponse(policy db.BackupPolicy) (policyResponse, error) {
 		return policyResponse{}, err
 	}
 
+	rcloneArgs, err := unmarshalPolicyRcloneArgs(policy.RcloneArgs)
+	if err != nil {
+		return policyResponse{}, err
+	}
+
 	return policyResponse{
 		ID:              policy.ID,
 		AgentID:         policy.AgentID,
@@ -321,10 +354,78 @@ func newPolicyResponse(policy db.BackupPolicy) (policyResponse, error) {
 		ExcludePatterns: excludePatterns,
 		Schedule:        policy.Schedule,
 		Retention:       retention,
+		RcloneArgs:      rcloneArgs,
 		Synced:          policy.Synced,
 		CreatedAt:       policy.CreatedAt,
 		UpdatedAt:       policy.UpdatedAt,
 	}, nil
+}
+
+func unmarshalPolicyRcloneArgs(raw string) (map[string]string, error) {
+	rcloneArgs := map[string]string{}
+	if raw == "" {
+		return rcloneArgs, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &rcloneArgs); err != nil {
+		return nil, err
+	}
+	if rcloneArgs == nil {
+		return map[string]string{}, nil
+	}
+	return rcloneArgs, nil
+}
+
+func validatePolicyRcloneArgs(c *gin.Context, args map[string]string) (map[string]string, bool) {
+	normalized := make(map[string]string, len(args))
+	for key, value := range args {
+		normalizedValue, ok := normalizePolicyRcloneArgValue(key, value)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rclone_args"})
+			return nil, false
+		}
+		normalized[key] = normalizedValue
+	}
+	return normalized, true
+}
+
+func normalizePolicyRcloneArgValue(key string, value string) (string, bool) {
+	if !isAllowedPolicyRcloneArg(key) {
+		return "", false
+	}
+
+	normalized := strings.TrimSpace(value)
+	if normalized == "" || strings.ContainsAny(normalized, " \t\r\n") {
+		return "", false
+	}
+
+	switch key {
+	case "transfers":
+		parsed, err := strconv.Atoi(normalized)
+		return normalized, err == nil && parsed > 0
+	case "retries", "low-level-retries":
+		parsed, err := strconv.Atoi(normalized)
+		return normalized, err == nil && parsed >= 0
+	case "tpslimit":
+		parsed, err := strconv.ParseFloat(normalized, 64)
+		return normalized, err == nil && parsed >= 0
+	case "retries-sleep", "timeout":
+		if normalized == "0" {
+			return normalized, true
+		}
+		parsed, err := time.ParseDuration(normalized)
+		return normalized, err == nil && parsed >= 0
+	default:
+		return "", false
+	}
+}
+
+func isAllowedPolicyRcloneArg(key string) bool {
+	switch key {
+	case "transfers", "tpslimit", "retries", "retries-sleep", "low-level-retries", "timeout":
+		return true
+	default:
+		return false
+	}
 }
 
 func marshalPolicyJSON(c *gin.Context, value any) (string, bool) {

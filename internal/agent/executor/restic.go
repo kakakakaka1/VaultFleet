@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -36,10 +38,11 @@ type SnapshotFileEntry struct {
 }
 
 type ResticRunner struct {
-	RcloneConfPath string
-	PasswordFile   string
-	RepoPath       string
-	CacheDir       string
+	RcloneConfPath  string
+	PasswordFile    string
+	RepoPath        string
+	CacheDir        string
+	RcloneExtraArgs map[string]string
 }
 
 func (r ResticRunner) repoArg() string {
@@ -70,8 +73,76 @@ func (r ResticRunner) baseArgs() []string {
 	} else {
 		args = append(args, "--insecure-no-password")
 	}
-	args = append(args, "-o", "rclone.args=serve restic --stdio --config "+r.RcloneConfPath)
+	args = append(args, "-o", "rclone.args="+r.rcloneServeArgs())
 	return args
+}
+
+func (r ResticRunner) rcloneServeArgs() string {
+	args := "serve restic --stdio --config " + r.RcloneConfPath
+	extraArgs := r.normalizedRcloneExtraArgs()
+	for _, arg := range extraArgs {
+		args += " " + arg
+	}
+	return args
+}
+
+func (r ResticRunner) normalizedRcloneExtraArgs() []string {
+	if len(r.RcloneExtraArgs) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(r.RcloneExtraArgs))
+	values := make(map[string]string, len(r.RcloneExtraArgs))
+	for key, value := range r.RcloneExtraArgs {
+		normalized, ok := normalizeRcloneExtraArgValue(key, value)
+		if isAllowedRcloneExtraArg(key) && ok {
+			keys = append(keys, key)
+			values[key] = normalized
+		}
+	}
+	sort.Strings(keys)
+
+	args := make([]string, 0, len(keys)*2)
+	for _, key := range keys {
+		args = append(args, "--"+key, values[key])
+	}
+	return args
+}
+
+func isAllowedRcloneExtraArg(key string) bool {
+	switch key {
+	case "transfers", "tpslimit", "retries", "retries-sleep", "low-level-retries", "timeout":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeRcloneExtraArgValue(key string, value string) (string, bool) {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" || strings.ContainsAny(normalized, " \t\r\n") {
+		return "", false
+	}
+
+	switch key {
+	case "transfers":
+		parsed, err := strconv.Atoi(normalized)
+		return normalized, err == nil && parsed > 0
+	case "retries", "low-level-retries":
+		parsed, err := strconv.Atoi(normalized)
+		return normalized, err == nil && parsed >= 0
+	case "tpslimit":
+		parsed, err := strconv.ParseFloat(normalized, 64)
+		return normalized, err == nil && parsed >= 0
+	case "retries-sleep", "timeout":
+		if normalized == "0" {
+			return normalized, true
+		}
+		parsed, err := time.ParseDuration(normalized)
+		return normalized, err == nil && parsed >= 0
+	default:
+		return "", false
+	}
 }
 
 func (r ResticRunner) hasPassword() bool {
@@ -88,6 +159,10 @@ func (r ResticRunner) buildInitCmd() *exec.Cmd {
 
 func (r ResticRunner) buildBackupCmd(dirs []string, excludes []string) *exec.Cmd {
 	return r.buildBackupCmdContext(context.Background(), dirs, excludes)
+}
+
+func (r ResticRunner) buildBackupWithProgressCmd(dirs []string, excludes []string) *exec.Cmd {
+	return r.buildBackupWithProgressCmdContext(context.Background(), dirs, excludes)
 }
 
 func (r ResticRunner) buildForgetCmd(retention RetentionPolicy) *exec.Cmd {
@@ -125,6 +200,15 @@ func (r ResticRunner) buildInitCmdContext(ctx context.Context) *exec.Cmd {
 
 func (r ResticRunner) buildBackupCmdContext(ctx context.Context, dirs []string, excludes []string) *exec.Cmd {
 	args := append([]string{"backup"}, r.baseArgs()...)
+	for _, exclude := range excludes {
+		args = append(args, "--exclude="+exclude)
+	}
+	args = append(args, dirs...)
+	return r.command(ctx, args...)
+}
+
+func (r ResticRunner) buildBackupWithProgressCmdContext(ctx context.Context, dirs []string, excludes []string) *exec.Cmd {
+	args := append([]string{"backup", "--json"}, r.baseArgs()...)
 	for _, exclude := range excludes {
 		args = append(args, "--exclude="+exclude)
 	}
@@ -216,7 +300,10 @@ func (r ResticRunner) InitRepo(ctx context.Context) error {
 // restic init does not trigger Mkdir itself — some S3-compatible backends
 // (e.g. Tianyi Cloud) return 409 Conflict when the parent directory already exists.
 func (r ResticRunner) ensureRemoteDir(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "rclone", "--config", r.RcloneConfPath, "mkdir", "vaultfleet:"+r.RepoPath)
+	args := []string{"--config", r.RcloneConfPath}
+	args = append(args, r.normalizedRcloneExtraArgs()...)
+	args = append(args, "mkdir", "vaultfleet:"+r.RepoPath)
+	cmd := exec.CommandContext(ctx, "rclone", args...)
 	cmd.Env = r.baseEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -268,6 +355,120 @@ func (r ResticRunner) RunBackup(ctx context.Context, dirs []string, excludes []s
 		return "", commandError("run restic backup", stderr.String(), err)
 	}
 	return stdout.String(), nil
+}
+
+func (r ResticRunner) RunBackupWithProgress(ctx context.Context, dirs []string, excludes []string, progressFn func(BackupProgress)) (string, error) {
+	cmd := r.buildBackupWithProgressCmdContext(ctx, dirs, excludes)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("prepare restic backup stdout: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return "", commandError("run restic backup", stderr.String(), err)
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+	var snapshotID string
+	var backupErrors []string
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var message struct {
+			MessageType  string          `json:"message_type"`
+			PercentDone  float64         `json:"percent_done"`
+			TotalFiles   int64           `json:"total_files"`
+			FilesDone    int64           `json:"files_done"`
+			TotalBytes   int64           `json:"total_bytes"`
+			BytesDone    int64           `json:"bytes_done"`
+			CurrentFiles []string        `json:"current_files"`
+			SnapshotID   string          `json:"snapshot_id"`
+			Error        json.RawMessage `json:"error"`
+			During       string          `json:"during"`
+			Item         string          `json:"item"`
+		}
+		if err := json.Unmarshal(line, &message); err != nil {
+			continue
+		}
+
+		switch message.MessageType {
+		case "status":
+			if progressFn != nil {
+				progress := BackupProgress{
+					PercentDone: message.PercentDone,
+					TotalFiles:  message.TotalFiles,
+					FilesDone:   message.FilesDone,
+					TotalBytes:  message.TotalBytes,
+					BytesDone:   message.BytesDone,
+				}
+				if len(message.CurrentFiles) > 0 {
+					progress.CurrentFile = message.CurrentFiles[0]
+				}
+				progressFn(progress)
+			}
+		case "summary":
+			snapshotID = message.SnapshotID
+		case "error":
+			if text := resticBackupJSONErrorText(message.Item, message.During, message.Error); text != "" {
+				backupErrors = append(backupErrors, text)
+			}
+		}
+	}
+
+	scannerErr := scanner.Err()
+	if scannerErr != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	waitErr := cmd.Wait()
+	if scannerErr != nil {
+		err := fmt.Errorf("scan restic backup JSON output: %w", scannerErr)
+		if waitErr != nil {
+			return "", fmt.Errorf("%w; %v", err, commandError("run restic backup", stderr.String(), waitErr))
+		}
+		return "", err
+	}
+	if waitErr != nil {
+		return "", commandError("run restic backup", resticBackupErrorDetails(stderr.String(), backupErrors), waitErr)
+	}
+	return snapshotID, nil
+}
+
+func resticBackupJSONErrorText(item string, during string, rawError json.RawMessage) string {
+	parts := make([]string, 0, 3)
+	if item != "" {
+		parts = append(parts, item)
+	}
+	if during != "" {
+		parts = append(parts, during)
+	}
+	if len(rawError) > 0 {
+		var message string
+		if err := json.Unmarshal(rawError, &message); err == nil {
+			if message != "" {
+				parts = append(parts, message)
+			}
+		} else {
+			parts = append(parts, strings.TrimSpace(string(rawError)))
+		}
+	}
+	return strings.Join(parts, ": ")
+}
+
+func resticBackupErrorDetails(stderr string, backupErrors []string) string {
+	details := strings.TrimSpace(stderr)
+	if len(backupErrors) == 0 {
+		return details
+	}
+	if details != "" {
+		details += "\n"
+	}
+	return details + strings.Join(backupErrors, "\n")
 }
 
 func (r ResticRunner) RunForget(ctx context.Context, retention RetentionPolicy) error {

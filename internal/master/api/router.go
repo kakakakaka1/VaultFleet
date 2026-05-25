@@ -28,13 +28,14 @@ type RouterHub interface {
 }
 
 type RouterConfig struct {
-	Database       *db.Database
-	Hub            RouterHub
-	CommandService *commands.Service
-	EventBus       *events.Bus
-	AgentWebSocket gin.HandlerFunc
-	Version        string
-	LogBuf         *logbuf.RingBuffer
+	Database           *db.Database
+	Hub                RouterHub
+	CommandService     *commands.Service
+	EventBus           *events.Bus
+	AgentWebSocket     gin.HandlerFunc
+	TaskProgressGetter func(agentID string, messageID string) *protocol.BackupProgressPayload
+	Version            string
+	LogBuf             *logbuf.RingBuffer
 }
 
 type PolicyPushTracker struct {
@@ -139,6 +140,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	restoreHandler.Commands = commandService
 	taskHandler := NewTaskHandler(cfg.Database, cfg.Hub)
 	taskHandler.Commands = commandService
+	taskHandler.ProgressGetter = cfg.TaskProgressGetter
 	commandHandler := NewCommandHandler(cfg.Database)
 	notificationHandler := NewNotificationHandler(cfg.Database)
 	systemHandler := NewSystemHandler(cfg.Database)
@@ -359,12 +361,18 @@ func policyPushPayload(database *db.Database, policy db.BackupPolicy, storage db
 		return protocol.PolicyPushPayload{}, err
 	}
 
+	rcloneArgs, err := unmarshalPolicyRcloneArgs(policy.RcloneArgs)
+	if err != nil {
+		return protocol.PolicyPushPayload{}, err
+	}
+
 	return protocol.PolicyPushPayload{
 		AgentID: policy.AgentID,
 		Storage: protocol.StorageConfig{
 			RcloneType:   storage.RcloneType,
 			RcloneConfig: rcloneConfig,
 			RepoPath:     repoPath,
+			RcloneArgs:   rcloneArgs,
 		},
 		ResticPassword:  resticPassword,
 		BackupDirs:      backupDirs,

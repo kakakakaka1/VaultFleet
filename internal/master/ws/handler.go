@@ -43,6 +43,7 @@ type Handler struct {
 	pongWait                      time.Duration
 	MasterVersion                 string
 	GitHubRepo                    string
+	ProgressCache                 *BackupProgressCache
 	versionNotifyMu               sync.Mutex
 	versionNotifyTimes            map[string]time.Time
 }
@@ -129,9 +130,17 @@ func (h *Handler) dispatchPendingCommands(agentID string) {
 }
 
 func (h *Handler) cleanupConnection(agentID string, conn *SafeConn) {
-	if h.hub.RemoveIfCurrent(agentID, conn) {
-		h.resetCapabilityDispatch(agentID)
-		h.resetVersionNotify(agentID)
+	removed, wasOnline := h.hub.RemoveIfCurrent(agentID, conn)
+	if !removed {
+		return
+	}
+
+	h.resetCapabilityDispatch(agentID)
+	h.resetVersionNotify(agentID)
+	if h.ProgressCache != nil {
+		h.ProgressCache.DeleteAgent(agentID)
+	}
+	if wasOnline {
 		h.updateAgentState(agentID, "offline", nil)
 		h.eventBus.Publish(events.Event{Type: events.AgentOffline, Payload: agentID})
 	}
@@ -206,6 +215,9 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 			},
 		})
 	case protocol.TypeTaskResult:
+		if h.ProgressCache != nil {
+			h.ProgressCache.Delete(agentID, msg.ID)
+		}
 		if h.taskResultProcess != nil {
 			if err := h.taskResultProcess(agentID, msg); err != nil {
 				log.Printf("process task result failed for agent %s: %v", agentID, err)
@@ -219,6 +231,13 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 				"payload":  msg.Payload,
 			},
 		})
+	case protocol.TypeBackupProgress:
+		if h.ProgressCache != nil {
+			if progress, err := protocol.ParsePayload[protocol.BackupProgressPayload](&msg); err == nil {
+				progress.AgentID = agentID
+				h.ProgressCache.Set(agentID, msg.ID, progress)
+			}
+		}
 	case protocol.TypeDirBrowseResp, protocol.TypeDirSizeResp, protocol.TypeSnapshotListResp, protocol.TypeSnapshotBrowseResp, protocol.TypeCollectLogsResp:
 		handled := h.hub.HandleResponse(agentID, msg)
 		if !handled && msg.Type == protocol.TypeSnapshotListResp && h.SnapshotListResponseProcessor != nil {

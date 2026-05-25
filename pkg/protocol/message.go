@@ -26,10 +26,11 @@ const (
 	TypeSnapshotBrowseResp  = "snapshot_browse_resp"
 	TypeCollectLogsReq      = "collect_logs_req"
 	TypeCollectLogsResp     = "collect_logs_resp"
-	TypeDirSizeReq         = "dir_size_req"
-	TypeDirSizeResp        = "dir_size_resp"
-	TypeVersionInfo = "version_info"
-	TypeUpdateAgent = "update_agent"
+	TypeDirSizeReq          = "dir_size_req"
+	TypeDirSizeResp         = "dir_size_resp"
+	TypeVersionInfo         = "version_info"
+	TypeUpdateAgent         = "update_agent"
+	TypeBackupProgress      = "backup_progress"
 )
 
 const (
@@ -119,6 +120,19 @@ type TaskResultPayload struct {
 	Snapshots  []SnapshotInfo `json:"snapshots,omitempty"`
 }
 
+// BackupProgressPayload reports incremental backup progress from an agent.
+type BackupProgressPayload struct {
+	AgentID     string  `json:"agent_id"`
+	Phase       string  `json:"phase"`
+	PercentDone float64 `json:"percent_done"`
+	TotalFiles  int64   `json:"total_files"`
+	FilesDone   int64   `json:"files_done"`
+	TotalBytes  int64   `json:"total_bytes"`
+	BytesDone   int64   `json:"bytes_done"`
+	BytesPerSec int64   `json:"bytes_per_sec"`
+	CurrentFile string  `json:"current_file"`
+}
+
 // RestoreProgressPayload reports incremental restore progress from an agent.
 type RestoreProgressPayload struct {
 	AgentID       string  `json:"agent_id"`
@@ -175,6 +189,7 @@ type StorageConfig struct {
 	RcloneType   string            `json:"rclone_type"`
 	RcloneConfig map[string]string `json:"rclone_config"`
 	RepoPath     string            `json:"repo_path"`
+	RcloneArgs   map[string]string `json:"rclone_args,omitempty"`
 }
 
 // RetentionPolicy maps directly to restic forget retention options.

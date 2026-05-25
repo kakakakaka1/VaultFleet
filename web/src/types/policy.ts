@@ -11,6 +11,7 @@ export interface BackupPolicy {
   created_at: string;
   updated_at: string;
   restic_password?: string;
+  rclone_args?: Record<string, string>;
 }
 
 export interface RetentionConfig {
@@ -30,4 +31,5 @@ export interface PolicyInput {
   exclude_patterns: string[];
   schedule: string;
   retention: RetentionConfig;
+  rclone_args?: Record<string, string>;
 }

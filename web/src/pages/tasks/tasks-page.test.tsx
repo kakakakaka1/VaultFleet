@@ -1,0 +1,123 @@
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import type { TaskHistory } from "@/types/task";
+import { formatBytes, formatSpeed, renderTaskMetricContent } from "./tasks-page";
+
+afterEach(() => {
+  cleanup();
+});
+
+describe("task progress helpers", () => {
+  it("formats byte counts using compact units", () => {
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(2 * 1024 * 1024)).toBe("2.0 MB");
+    expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe("3.00 GB");
+  });
+
+  it("formats upload speed only when positive", () => {
+    expect(formatSpeed(0)).toBe("");
+    expect(formatSpeed(-1)).toBe("");
+    expect(formatSpeed(512)).toBe("512 B/s");
+    expect(formatSpeed(512 * 1024)).toBe("512.0 KB/s");
+    expect(formatSpeed(2 * 1024 * 1024)).toBe("2.0 MB/s");
+  });
+
+  it("renders active backup progress with percent and upload speed", () => {
+    render(
+      <>
+        {renderTaskMetricContent(
+          task({
+            status: "running",
+            progress: {
+              agent_id: "agent-1",
+              phase: "backup",
+              percent_done: 0.424,
+              total_files: 100,
+              files_done: 42,
+              total_bytes: 10 * 1024 * 1024,
+              bytes_done: 4 * 1024 * 1024,
+              bytes_per_sec: 2 * 1024 * 1024,
+              current_file: "/data/archive.tar",
+            },
+          }),
+        )}
+      </>,
+    );
+
+    expect(screen.getByText("上传中: 4.0 MB / 10.0 MB (42%)")).toBeInTheDocument();
+    expect(screen.getByText("↑2.0 MB/s")).toBeInTheDocument();
+  });
+
+  it("renders percentage-scale progress values without multiplying again", () => {
+    render(
+      <>
+        {renderTaskMetricContent(
+          task({
+            status: "running",
+            progress: {
+              agent_id: "agent-1",
+              phase: "backup",
+              percent_done: 64.5,
+              total_files: 0,
+              files_done: 0,
+              total_bytes: 4096,
+              bytes_done: 2048,
+              bytes_per_sec: 0,
+              current_file: "",
+            },
+          }),
+        )}
+      </>,
+    );
+
+    expect(screen.getByText("上传中: 2.0 KB / 4.0 KB (65%)")).toBeInTheDocument();
+    expect(screen.queryByText(/^↑/)).not.toBeInTheDocument();
+  });
+
+  it("renders active task fallback states and completed metrics", () => {
+    const { rerender } = render(<>{renderTaskMetricContent(task({ status: "pending" }))}</>);
+    expect(screen.getByText("准备中...")).toBeInTheDocument();
+
+    rerender(
+      <>
+        {renderTaskMetricContent(
+          task({
+            status: "running",
+            progress: {
+              agent_id: "agent-1",
+              phase: "forget",
+              percent_done: 0,
+              total_files: 0,
+              files_done: 0,
+              total_bytes: 0,
+              bytes_done: 0,
+              bytes_per_sec: 0,
+              current_file: "",
+            },
+          }),
+        )}
+      </>,
+    );
+    expect(screen.getByText("清理旧快照...")).toBeInTheDocument();
+
+    rerender(<>{renderTaskMetricContent(task({ status: "success", duration_ms: 1530, repo_size: 5 * 1024 * 1024 }))}</>);
+    expect(screen.getByText("1.5s")).toBeInTheDocument();
+    expect(screen.getByText("5.00 MB")).toBeInTheDocument();
+
+    rerender(<>{renderTaskMetricContent(task({ status: "success", duration_ms: 1530, repo_size: 4096 }))}</>);
+    expect(screen.getByText("0.00 MB")).toBeInTheDocument();
+  });
+});
+
+function task(overrides: Partial<TaskHistory> = {}): TaskHistory {
+  return {
+    id: 1,
+    message_id: "msg-1",
+    agent_id: "agent-1",
+    type: "backup",
+    status: "success",
+    created_at: "2026-05-25T00:00:00Z",
+    ...overrides,
+  };
+}

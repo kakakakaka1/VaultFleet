@@ -17,7 +17,10 @@ import (
 	"vaultfleet/pkg/protocol"
 )
 
-const maxSnapshotBrowseResponseBytes = 900 * 1024
+const (
+	maxSnapshotBrowseResponseBytes = 900 * 1024
+	backupProgressThrottleInterval = 5 * time.Second
+)
 
 type SendFunc func(protocol.Message) error
 
@@ -30,6 +33,7 @@ type AgentUpdater interface {
 }
 
 type BackupRunnerFunc func(context.Context, executor.ExecutorConfig) executor.TaskResult
+type BackupRunnerWithProgressFunc func(context.Context, executor.ExecutorConfig, executor.ProgressCallback) executor.TaskResult
 type RestoreRunnerFunc func(context.Context, executor.ExecutorConfig, string, string, []string) error
 type SnapshotListRunnerFunc func(context.Context, executor.ExecutorConfig) ([]executor.SnapshotInfo, error)
 type SnapshotBrowseRunnerFunc func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error)
@@ -41,39 +45,41 @@ type policyScheduler interface {
 }
 
 type HandlerConfig struct {
-	PolicyStore          *policy.Store
-	SendFunc             SendFunc
-	BrowseFunc           BrowseFunc
-	ConfigDir            string
-	AgentID              string
-	LogFile              string
-	Scheduler            policyScheduler
-	BackupRunner         BackupRunnerFunc
-	RestoreRunner        RestoreRunnerFunc
-	SnapshotListRunner   SnapshotListRunnerFunc
-	SnapshotBrowseRunner SnapshotBrowseRunnerFunc
-	DirSizeFunc          DirSizeFunc
-	AgentVersion string
-	Updater      AgentUpdater
+	PolicyStore              *policy.Store
+	SendFunc                 SendFunc
+	BrowseFunc               BrowseFunc
+	ConfigDir                string
+	AgentID                  string
+	LogFile                  string
+	Scheduler                policyScheduler
+	BackupRunner             BackupRunnerFunc
+	BackupRunnerWithProgress BackupRunnerWithProgressFunc
+	RestoreRunner            RestoreRunnerFunc
+	SnapshotListRunner       SnapshotListRunnerFunc
+	SnapshotBrowseRunner     SnapshotBrowseRunnerFunc
+	DirSizeFunc              DirSizeFunc
+	AgentVersion             string
+	Updater                  AgentUpdater
 }
 
 type Handler struct {
-	policyStore          *policy.Store
-	send                 SendFunc
-	browse               BrowseFunc
-	configDir            string
-	agentID              string
-	logFile              string
-	scheduler            policyScheduler
-	backupRunner         BackupRunnerFunc
-	restoreRunner        RestoreRunnerFunc
-	snapshotListRunner   SnapshotListRunnerFunc
-	snapshotBrowseRunner SnapshotBrowseRunnerFunc
-	dirSizeFunc          DirSizeFunc
-	agentVersion string
-	updater      AgentUpdater
-	backupMu             sync.Mutex
-	backupRunning        bool
+	policyStore              *policy.Store
+	send                     SendFunc
+	browse                   BrowseFunc
+	configDir                string
+	agentID                  string
+	logFile                  string
+	scheduler                policyScheduler
+	backupRunner             BackupRunnerFunc
+	backupRunnerWithProgress BackupRunnerWithProgressFunc
+	restoreRunner            RestoreRunnerFunc
+	snapshotListRunner       SnapshotListRunnerFunc
+	snapshotBrowseRunner     SnapshotBrowseRunnerFunc
+	dirSizeFunc              DirSizeFunc
+	agentVersion             string
+	updater                  AgentUpdater
+	backupMu                 sync.Mutex
+	backupRunning            bool
 }
 
 func NewHandler(config HandlerConfig) *Handler {
@@ -88,6 +94,16 @@ func NewHandler(config HandlerConfig) *Handler {
 	runner := config.BackupRunner
 	if runner == nil {
 		runner = runBackup
+	}
+	progressRunner := config.BackupRunnerWithProgress
+	if progressRunner == nil {
+		if config.BackupRunner != nil {
+			progressRunner = func(ctx context.Context, cfg executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
+				return runner(ctx, cfg)
+			}
+		} else {
+			progressRunner = runBackupWithProgress
+		}
 	}
 	restoreRunner := config.RestoreRunner
 	if restoreRunner == nil {
@@ -114,20 +130,21 @@ func NewHandler(config HandlerConfig) *Handler {
 		policyScheduler = defaultScheduler
 	}
 	return &Handler{
-		policyStore:          config.PolicyStore,
-		send:                 config.SendFunc,
-		browse:               browse,
-		configDir:            configDir,
-		agentID:              config.AgentID,
-		logFile:              config.LogFile,
-		scheduler:            policyScheduler,
-		backupRunner:         runner,
-		restoreRunner:        restoreRunner,
-		snapshotListRunner:   snapshotListRunner,
-		snapshotBrowseRunner: snapshotBrowseRunner,
-		dirSizeFunc:          dirSizeFunc,
-		agentVersion: config.AgentVersion,
-		updater:      config.Updater,
+		policyStore:              config.PolicyStore,
+		send:                     config.SendFunc,
+		browse:                   browse,
+		configDir:                configDir,
+		agentID:                  config.AgentID,
+		logFile:                  config.LogFile,
+		scheduler:                policyScheduler,
+		backupRunner:             runner,
+		backupRunnerWithProgress: progressRunner,
+		restoreRunner:            restoreRunner,
+		snapshotListRunner:       snapshotListRunner,
+		snapshotBrowseRunner:     snapshotBrowseRunner,
+		dirSizeFunc:              dirSizeFunc,
+		agentVersion:             config.AgentVersion,
+		updater:                  config.Updater,
 	}
 }
 
@@ -509,8 +526,71 @@ func (h *Handler) runBackupForPolicy(messageID string, agentID string, policyPay
 	defer h.endBackup()
 
 	startedAt := time.Now()
-	result := h.backupRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload))
+	result := h.backupRunnerWithProgress(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), h.backupProgressCallback(messageID, agentID))
 	h.sendTaskResultWithID(messageID, result.ToProtocol(agentID, startedAt))
+}
+
+func (h *Handler) backupProgressCallback(messageID string, agentID string) executor.ProgressCallback {
+	var mu sync.Mutex
+	var lastPhase string
+	var lastSentAt time.Time
+	var lastBytesDone int64
+	var lastBytesAt time.Time
+	var sentMeasuredProgress bool
+
+	return func(phase string, progress *executor.BackupProgress) {
+		now := time.Now()
+		mu.Lock()
+		hasMeasuredProgress := progress != nil
+		if phase == lastPhase && !lastSentAt.IsZero() && now.Sub(lastSentAt) < backupProgressThrottleInterval && (!hasMeasuredProgress || sentMeasuredProgress) {
+			mu.Unlock()
+			return
+		}
+
+		payload := protocol.BackupProgressPayload{
+			AgentID: agentID,
+			Phase:   phase,
+		}
+		if progress != nil {
+			payload.PercentDone = progress.PercentDone
+			payload.TotalFiles = progress.TotalFiles
+			payload.FilesDone = progress.FilesDone
+			payload.TotalBytes = progress.TotalBytes
+			payload.BytesDone = progress.BytesDone
+			payload.CurrentFile = progress.CurrentFile
+			if !lastBytesAt.IsZero() {
+				bytesDelta := progress.BytesDone - lastBytesDone
+				timeDelta := now.Sub(lastBytesAt)
+				if bytesDelta > 0 && timeDelta > 0 {
+					payload.BytesPerSec = int64(float64(bytesDelta) / timeDelta.Seconds())
+				}
+			}
+		}
+
+		h.sendBackupProgress(messageID, payload)
+		lastPhase = phase
+		lastSentAt = now
+		if progress != nil {
+			lastBytesDone = progress.BytesDone
+			lastBytesAt = now
+			sentMeasuredProgress = true
+		}
+		mu.Unlock()
+	}
+}
+
+func (h *Handler) sendBackupProgress(messageID string, payload protocol.BackupProgressPayload) {
+	msg, err := protocol.NewMessage(protocol.TypeBackupProgress, payload)
+	if err != nil {
+		log.Printf("create backup progress failed: %v", err)
+		return
+	}
+	if messageID != "" {
+		msg.ID = messageID
+	}
+	if err := h.sendMessage(*msg); err != nil {
+		log.Printf("send backup progress failed: %v", err)
+	}
 }
 
 func (h *Handler) beginBackup() bool {
@@ -656,36 +736,55 @@ func executorConfigForPolicy(configDir string, policyPayload *protocol.PolicyPus
 		BackupDirs: append([]string(nil), policyPayload.BackupDirs...),
 		Excludes:   append([]string(nil), policyPayload.ExcludePatterns...),
 		Retention:  toExecutorRetention(policyPayload.Retention),
+		RcloneArgs: copyStringMap(policyPayload.Storage.RcloneArgs),
 	}
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	copied := make(map[string]string, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
 }
 
 func runBackup(ctx context.Context, cfg executor.ExecutorConfig) executor.TaskResult {
 	return executor.NewExecutor(cfg).RunBackupJob(ctx)
 }
 
+func runBackupWithProgress(ctx context.Context, cfg executor.ExecutorConfig, progressFn executor.ProgressCallback) executor.TaskResult {
+	return executor.NewExecutor(cfg).RunBackupJobWithProgress(ctx, progressFn)
+}
+
 func runRestore(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, target string, includePaths []string) error {
 	runner := executor.ResticRunner{
-		RcloneConfPath: filepath.Join(cfg.ConfigDir, "rclone.conf"),
-		PasswordFile:   filepath.Join(cfg.ConfigDir, ".restic-password"),
-		RepoPath:       cfg.RepoPath,
+		RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
+		PasswordFile:    filepath.Join(cfg.ConfigDir, ".restic-password"),
+		RepoPath:        cfg.RepoPath,
+		RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
 	}
 	return runner.RestoreSnapshot(ctx, snapshotID, target, includePaths)
 }
 
 func runSnapshotList(ctx context.Context, cfg executor.ExecutorConfig) ([]executor.SnapshotInfo, error) {
 	runner := executor.ResticRunner{
-		RcloneConfPath: filepath.Join(cfg.ConfigDir, "rclone.conf"),
-		PasswordFile:   filepath.Join(cfg.ConfigDir, ".restic-password"),
-		RepoPath:       cfg.RepoPath,
+		RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
+		PasswordFile:    filepath.Join(cfg.ConfigDir, ".restic-password"),
+		RepoPath:        cfg.RepoPath,
+		RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
 	}
 	return runner.ListSnapshots(ctx)
 }
 
 func runSnapshotBrowse(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, path string) ([]executor.SnapshotFileEntry, error) {
 	runner := executor.ResticRunner{
-		RcloneConfPath: filepath.Join(cfg.ConfigDir, "rclone.conf"),
-		PasswordFile:   filepath.Join(cfg.ConfigDir, ".restic-password"),
-		RepoPath:       cfg.RepoPath,
+		RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
+		PasswordFile:    filepath.Join(cfg.ConfigDir, ".restic-password"),
+		RepoPath:        cfg.RepoPath,
+		RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
 	}
 	if path != "" {
 		return runner.LsSnapshot(ctx, snapshotID, path)

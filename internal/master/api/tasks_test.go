@@ -139,6 +139,159 @@ func TestListTasksExposesRepositorySizeAndErrorAliases(t *testing.T) {
 	assert.Equal(t, "restic failed", task["error"])
 }
 
+func TestListTasksAttachesProgressForRunningTask(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	history := seedTaskHistory(t, setup.database, agent.ID, "backup", commands.TaskStatusRunning, "snap-running", now)
+	setup.handler.ProgressGetter = func(agentID string, messageID string) *protocol.BackupProgressPayload {
+		require.Equal(t, agent.ID, agentID)
+		require.Equal(t, history.MessageID, messageID)
+		return &protocol.BackupProgressPayload{
+			AgentID:     agentID,
+			Phase:       "backup",
+			PercentDone: 64.5,
+			FilesDone:   8,
+			TotalFiles:  12,
+			BytesDone:   2048,
+			TotalBytes:  4096,
+			BytesPerSec: 1024,
+			CurrentFile: "/srv/current.db",
+		}
+	}
+
+	w := getJSON(t, setup.router, "/api/tasks?agent_id="+agent.ID+"&limit=1")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireList(t, body["data"])
+	require.Len(t, data, 1)
+	task := requireMap(t, data[0])
+	progress := requireMap(t, task["progress"])
+	assert.Equal(t, agent.ID, progress["agent_id"])
+	assert.Equal(t, "backup", progress["phase"])
+	assert.Equal(t, 64.5, progress["percent_done"])
+	assert.Equal(t, float64(2048), progress["bytes_done"])
+	assert.Equal(t, "/srv/current.db", progress["current_file"])
+}
+
+func TestListTasksAttachesProgressForPendingTask(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "offline")
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	history := seedTaskHistory(t, setup.database, agent.ID, "backup", commands.TaskStatusPending, "snap-pending", now)
+	setup.handler.ProgressGetter = func(agentID string, messageID string) *protocol.BackupProgressPayload {
+		require.Equal(t, agent.ID, agentID)
+		require.Equal(t, history.MessageID, messageID)
+		return &protocol.BackupProgressPayload{
+			AgentID:     agentID,
+			Phase:       "queued",
+			PercentDone: 0,
+		}
+	}
+
+	w := getJSON(t, setup.router, "/api/tasks?agent_id="+agent.ID+"&limit=1")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireList(t, body["data"])
+	require.Len(t, data, 1)
+	task := requireMap(t, data[0])
+	progress := requireMap(t, task["progress"])
+	assert.Equal(t, "queued", progress["phase"])
+}
+
+func TestListTasksOmitsBackupProgressForRestoreTask(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	seedTaskHistory(t, setup.database, agent.ID, "restore", commands.TaskStatusRunning, "snap-restore", now)
+	progressGetterCalled := false
+	setup.handler.ProgressGetter = func(agentID string, messageID string) *protocol.BackupProgressPayload {
+		progressGetterCalled = true
+		return &protocol.BackupProgressPayload{
+			AgentID: agentID,
+			Phase:   "backup",
+		}
+	}
+
+	w := getJSON(t, setup.router, "/api/tasks?agent_id="+agent.ID+"&limit=1")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireList(t, body["data"])
+	require.Len(t, data, 1)
+	task := requireMap(t, data[0])
+	assert.NotContains(t, task, "progress")
+	assert.False(t, progressGetterCalled, "restore tasks should not look up backup progress")
+}
+
+func TestListTasksOmitsProgressForCompletedTask(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	history := seedTaskHistory(t, setup.database, agent.ID, "backup", commands.TaskStatusSuccess, "snap-success", now)
+	setup.handler.ProgressGetter = func(agentID string, messageID string) *protocol.BackupProgressPayload {
+		require.Equal(t, agent.ID, agentID)
+		require.Equal(t, history.MessageID, messageID)
+		return &protocol.BackupProgressPayload{
+			AgentID:     agentID,
+			Phase:       "backup",
+			PercentDone: 100,
+		}
+	}
+
+	w := getJSON(t, setup.router, "/api/tasks?agent_id="+agent.ID+"&limit=1")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireList(t, body["data"])
+	require.Len(t, data, 1)
+	task := requireMap(t, data[0])
+	assert.NotContains(t, task, "progress")
+}
+
+func TestListTasksUsesMessageIDWhenAttachingBackupProgress(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	now := time.Date(2026, 5, 19, 10, 0, 0, 0, time.UTC)
+	first := seedTaskHistoryWithMessageID(t, setup.database, agent.ID, "backup", commands.TaskStatusRunning, "snap-first", now.Add(time.Second), "backup-msg-1")
+	second := seedTaskHistoryWithMessageID(t, setup.database, agent.ID, "backup", commands.TaskStatusRunning, "snap-second", now, "backup-msg-2")
+	calls := map[string]int{}
+	setup.handler.ProgressGetter = func(agentID string, messageID string) *protocol.BackupProgressPayload {
+		require.Equal(t, agent.ID, agentID)
+		calls[messageID]++
+		if messageID != first.MessageID {
+			return nil
+		}
+		return &protocol.BackupProgressPayload{
+			AgentID:     agentID,
+			Phase:       "backup",
+			PercentDone: 25,
+		}
+	}
+
+	w := getJSON(t, setup.router, "/api/tasks?agent_id="+agent.ID+"&limit=2")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireList(t, body["data"])
+	require.Len(t, data, 2)
+	for _, item := range data {
+		task := requireMap(t, item)
+		switch task["message_id"] {
+		case first.MessageID:
+			progress := requireMap(t, task["progress"])
+			assert.Equal(t, "backup", progress["phase"])
+		case second.MessageID:
+			assert.NotContains(t, task, "progress")
+		default:
+			t.Fatalf("unexpected task message_id %v", task["message_id"])
+		}
+	}
+	assert.Equal(t, map[string]int{first.MessageID: 1, second.MessageID: 1}, calls)
+}
+
 type tasksAPISetup struct {
 	database *db.Database
 	hub      *fakeCommandHub
@@ -200,6 +353,11 @@ func createTasksTestAgent(t *testing.T, database *db.Database, status string) db
 
 func seedTaskHistory(t *testing.T, database *db.Database, agentID string, taskType string, status string, snapshotID string, createdAt time.Time) db.TaskHistory {
 	t.Helper()
+	return seedTaskHistoryWithMessageID(t, database, agentID, taskType, status, snapshotID, createdAt, "msg-"+snapshotID)
+}
+
+func seedTaskHistoryWithMessageID(t *testing.T, database *db.Database, agentID string, taskType string, status string, snapshotID string, createdAt time.Time, messageID string) db.TaskHistory {
+	t.Helper()
 
 	startedAt := createdAt.Add(-time.Minute)
 	finishedAt := createdAt
@@ -208,6 +366,7 @@ func seedTaskHistory(t *testing.T, database *db.Database, agentID string, taskTy
 		Type:       taskType,
 		Status:     status,
 		SnapshotID: snapshotID,
+		MessageID:  messageID,
 		CommandID:  "cmd-" + snapshotID,
 		PolicyID:   "policy-" + snapshotID,
 		StorageID:  "storage-" + snapshotID,

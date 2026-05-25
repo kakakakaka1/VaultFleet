@@ -56,6 +56,35 @@ func TestNewExecutorBuildsRunnerAndCopiesConfig(t *testing.T) {
 	}
 }
 
+func TestNewExecutorPassesRcloneArgsToRunner(t *testing.T) {
+	cfg := ExecutorConfig{
+		ConfigDir: "/var/lib/vaultfleet",
+		RepoPath:  "repo/agent-1",
+		RcloneArgs: map[string]string{
+			"transfers": "2",
+			"tpslimit":  "4",
+		},
+	}
+
+	executor := NewExecutor(cfg)
+
+	runner, ok := executor.restic.(ResticRunner)
+	if !ok {
+		t.Fatalf("NewExecutor() restic runner type = %T, want ResticRunner", executor.restic)
+	}
+	if runner.RcloneExtraArgs["transfers"] != "2" {
+		t.Fatalf("RcloneExtraArgs[transfers] = %q, want 2", runner.RcloneExtraArgs["transfers"])
+	}
+	if runner.RcloneExtraArgs["tpslimit"] != "4" {
+		t.Fatalf("RcloneExtraArgs[tpslimit] = %q, want 4", runner.RcloneExtraArgs["tpslimit"])
+	}
+
+	cfg.RcloneArgs["transfers"] = "99"
+	if runner.RcloneExtraArgs["transfers"] != "2" {
+		t.Fatalf("RcloneExtraArgs were not copied: %#v", runner.RcloneExtraArgs)
+	}
+}
+
 func TestRunBackupJobSuccessReturnsLatestSnapshotAndSnapshots(t *testing.T) {
 	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
 	runner := &recordingRunner{
@@ -135,6 +164,72 @@ func TestRunBackupJobFailureStopsAtStageAndReturnsErrorLog(t *testing.T) {
 		t.Fatalf("ErrorLog = %q, want backup stage and error", result.ErrorLog)
 	}
 	assertRunnerCalls(t, runner.calls, []string{"init", "backup"})
+}
+
+func TestRunBackupJobWithProgressReportsPhasesAndUsesProgressRunner(t *testing.T) {
+	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	runner := &recordingRunner{
+		repoSize: 2048,
+		snapshots: []SnapshotInfo{
+			{ID: "snap-1", Time: now},
+		},
+	}
+	executor := &Executor{
+		restic:     runner,
+		backupDirs: []string{"/data"},
+		excludes:   []string{"*.tmp"},
+		retention:  RetentionPolicy{KeepLast: 1},
+	}
+	var phases []string
+	var updates []BackupProgress
+
+	result := executor.RunBackupJobWithProgress(context.Background(), func(phase string, progress *BackupProgress) {
+		phases = append(phases, phase)
+		if progress != nil {
+			updates = append(updates, *progress)
+		}
+	})
+
+	if result.Status != "success" {
+		t.Fatalf("Status = %q, want success; error log: %q", result.Status, result.ErrorLog)
+	}
+	assertRunnerCalls(t, runner.calls, []string{"init", "backup_with_progress", "forget", "snapshots", "stats"})
+	wantPhases := []string{"init", "backup", "backup", "backup", "forget", "stats"}
+	if strings.Join(phases, ",") != strings.Join(wantPhases, ",") {
+		t.Fatalf("progress phases = %#v, want %#v", phases, wantPhases)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("progress updates = %#v, want 2 updates", updates)
+	}
+	if updates[0].PercentDone != 0.5 || updates[0].FilesDone != 1 || updates[0].CurrentFile != "/data/a.txt" {
+		t.Fatalf("first progress update = %+v", updates[0])
+	}
+	if updates[1].PercentDone != 1 || updates[1].FilesDone != 2 || updates[1].CurrentFile != "/data/b.txt" {
+		t.Fatalf("second progress update = %+v", updates[1])
+	}
+}
+
+func TestRunBackupJobWithProgressFallsBackToPlainBackupRunner(t *testing.T) {
+	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	runner := &plainRecordingRunner{
+		repoSize:  1024,
+		snapshots: []SnapshotInfo{{ID: "snap-plain", Time: now}},
+	}
+	executor := &Executor{
+		restic:     runner,
+		backupDirs: []string{"/data"},
+		retention:  RetentionPolicy{KeepLast: 1},
+	}
+
+	result := executor.RunBackupJobWithProgress(context.Background(), nil)
+
+	if result.Status != "success" {
+		t.Fatalf("Status = %q, want success; error log: %q", result.Status, result.ErrorLog)
+	}
+	if result.SnapshotID != "snap-plain" {
+		t.Fatalf("SnapshotID = %q, want snap-plain", result.SnapshotID)
+	}
+	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots", "stats"})
 }
 
 func TestTaskResultJSONUsesSnakeCaseProtocolKeys(t *testing.T) {
@@ -299,6 +394,32 @@ func (r *recordingRunner) RunBackup(_ context.Context, dirs []string, excludes [
 	return r.backupOut, r.backupErr
 }
 
+func (r *recordingRunner) RunBackupWithProgress(_ context.Context, dirs []string, excludes []string, progressFn func(BackupProgress)) (string, error) {
+	r.calls = append(r.calls, "backup_with_progress")
+	if r.backupDelay > 0 {
+		time.Sleep(r.backupDelay)
+	}
+	if r.backupErr == nil && progressFn != nil {
+		progressFn(BackupProgress{
+			PercentDone: 0.5,
+			TotalFiles:  2,
+			FilesDone:   1,
+			TotalBytes:  200,
+			BytesDone:   100,
+			CurrentFile: "/data/a.txt",
+		})
+		progressFn(BackupProgress{
+			PercentDone: 1,
+			TotalFiles:  2,
+			FilesDone:   2,
+			TotalBytes:  200,
+			BytesDone:   200,
+			CurrentFile: "/data/b.txt",
+		})
+	}
+	return r.backupOut, r.backupErr
+}
+
 func (r *recordingRunner) RunForget(_ context.Context, retention RetentionPolicy) error {
 	r.calls = append(r.calls, "forget")
 	return r.forgetErr
@@ -317,6 +438,44 @@ func (r *recordingRunner) RepositorySize(context.Context) (int64, error) {
 func (r *recordingRunner) RestoreSnapshot(context.Context, string, string, []string) error {
 	r.calls = append(r.calls, "restore")
 	return r.restoreErr
+}
+
+type plainRecordingRunner struct {
+	calls     []string
+	backupErr error
+	forgetErr error
+	snapshots []SnapshotInfo
+	repoSize  int64
+}
+
+func (r *plainRecordingRunner) InitRepo(context.Context) error {
+	r.calls = append(r.calls, "init")
+	return nil
+}
+
+func (r *plainRecordingRunner) RunBackup(context.Context, []string, []string) (string, error) {
+	r.calls = append(r.calls, "backup")
+	return "", r.backupErr
+}
+
+func (r *plainRecordingRunner) RunForget(context.Context, RetentionPolicy) error {
+	r.calls = append(r.calls, "forget")
+	return r.forgetErr
+}
+
+func (r *plainRecordingRunner) ListSnapshots(context.Context) ([]SnapshotInfo, error) {
+	r.calls = append(r.calls, "snapshots")
+	return r.snapshots, nil
+}
+
+func (r *plainRecordingRunner) RepositorySize(context.Context) (int64, error) {
+	r.calls = append(r.calls, "stats")
+	return r.repoSize, nil
+}
+
+func (r *plainRecordingRunner) RestoreSnapshot(context.Context, string, string, []string) error {
+	r.calls = append(r.calls, "restore")
+	return nil
 }
 
 func assertRunnerCalls(t *testing.T, got, want []string) {

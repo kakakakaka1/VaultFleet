@@ -1,3 +1,15 @@
+export interface BackupProgress {
+  agent_id: string;
+  phase: "init" | "backup" | "forget" | "stats";
+  percent_done: number;
+  total_files: number;
+  files_done: number;
+  total_bytes: number;
+  bytes_done: number;
+  bytes_per_sec: number;
+  current_file: string;
+}
+
 export interface TaskHistory {
   id: number;
   message_id: string;
@@ -13,6 +25,7 @@ export interface TaskHistory {
   repo_size?: number;
   duration_ms?: number;
   error_log?: string;
+  progress?: BackupProgress;
   created_at: string;
   updated_at?: string;
 }

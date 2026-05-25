@@ -180,6 +180,7 @@ func TestBackupPolicyCRUD(t *testing.T) {
 		ExcludePatterns: `["*.log"]`,
 		Schedule:        "0 3 * * *",
 		Retention:       `{"keep_last":3,"keep_daily":7}`,
+		RcloneArgs:      `{"--bwlimit":"10M","--transfers":"4"}`,
 		Synced:          false,
 	}
 	require.NoError(t, database.DB.Create(&policy).Error)
@@ -188,6 +189,7 @@ func TestBackupPolicyCRUD(t *testing.T) {
 	var found BackupPolicy
 	require.NoError(t, database.DB.First(&found, "id = ?", policy.ID).Error)
 	assert.Equal(t, "0 3 * * *", found.Schedule)
+	assert.Equal(t, `{"--bwlimit":"10M","--transfers":"4"}`, found.RcloneArgs)
 	assert.False(t, found.Synced)
 
 	require.NoError(t, database.DB.Model(&found).Update("synced", true).Error)

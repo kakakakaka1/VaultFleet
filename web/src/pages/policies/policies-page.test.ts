@@ -1,0 +1,44 @@
+import { describe, expect, it } from "vitest";
+import { cleanRcloneArgs, defaultRcloneArgs, submitRcloneArgs } from "./policies-page";
+
+describe("policy rclone args helpers", () => {
+  it("returns WebDAV transfer defaults", () => {
+    expect(defaultRcloneArgs("webdav")).toEqual({
+      transfers: "2",
+      tpslimit: "4",
+      retries: "10",
+      "retries-sleep": "10s",
+      "low-level-retries": "20",
+      timeout: "10m0s",
+    });
+  });
+
+  it("does not set defaults for non-WebDAV storage", () => {
+    expect(defaultRcloneArgs("s3")).toEqual({});
+    expect(defaultRcloneArgs("")).toEqual({});
+  });
+
+  it("trims rclone args and omits empty values", () => {
+    expect(
+      cleanRcloneArgs({
+        transfers: " 2 ",
+        tpslimit: "",
+        retries: "   ",
+        timeout: " 10m0s",
+      }),
+    ).toEqual({
+      transfers: "2",
+      timeout: "10m0s",
+    });
+  });
+
+  it("returns undefined when no rclone args remain after cleaning", () => {
+    expect(cleanRcloneArgs({ transfers: " ", timeout: "" })).toBeUndefined();
+    expect(cleanRcloneArgs({})).toBeUndefined();
+  });
+
+  it("sends an empty object to clear saved args when editing", () => {
+    expect(submitRcloneArgs({ transfers: " ", timeout: "" }, true)).toEqual({});
+    expect(submitRcloneArgs({ transfers: " ", timeout: "" }, false)).toBeUndefined();
+  });
+});

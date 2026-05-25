@@ -66,6 +66,7 @@ type BackupPolicy struct {
 	ExcludePatterns string    `gorm:"type:text" json:"exclude_patterns"`
 	Schedule        string    `gorm:"type:text" json:"schedule"`
 	Retention       string    `gorm:"type:text" json:"retention"`
+	RcloneArgs      string    `gorm:"type:text" json:"rclone_args"`
 	Synced          bool      `gorm:"default:false" json:"synced"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`

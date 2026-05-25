@@ -3,9 +3,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { listTasks } from "@/services/tasks";
 import { listAgents, backupNow } from "@/services/agents";
+import type { TaskHistory } from "@/types/task";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -14,9 +14,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Card } from "@/components/ui/card";
-import { ChevronDown, ChevronUp, Search, XCircle, Info, RefreshCw, Play } from "lucide-react";
-import { format, formatDistanceToNow } from "date-fns";
+import { ChevronDown, ChevronUp, XCircle, Info, RefreshCw, Play } from "lucide-react";
+import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -184,10 +183,7 @@ export function TasksPage() {
                       <StatusBadge status={task.status} />
                     </TableCell>
                     <TableCell className="text-xs">
-                      <div className="flex flex-col">
-                        <span>{task.duration_ms ? `${(task.duration_ms / 1000).toFixed(1)}s` : "-"}</span>
-                        {task.repo_size && <span className="text-muted-foreground">{(task.repo_size / 1024 / 1024).toFixed(2)} MB</span>}
-                      </div>
+                      {renderTaskMetricContent(task)}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {task.finished_at ? format(new Date(task.finished_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN }) : "-"}
@@ -273,6 +269,79 @@ export function TasksPage() {
         loading={backupMutation.isPending}
         variant="default"
       />
+    </div>
+  );
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+export function formatSpeed(bytesPerSec: number): string {
+  if (bytesPerSec <= 0) return "";
+  if (bytesPerSec < 1024) return `${bytesPerSec} B/s`;
+  if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+  return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`;
+}
+
+export function renderTaskMetricContent(task: TaskHistory) {
+  if (task.status === "pending" || task.status === "running") {
+    return renderTaskProgress(task);
+  }
+
+  return (
+    <div className="flex min-h-8 flex-col justify-center">
+      <span>{task.duration_ms ? `${(task.duration_ms / 1000).toFixed(1)}s` : "-"}</span>
+      {task.repo_size ? (
+        <span className="text-muted-foreground">{(task.repo_size / 1024 / 1024).toFixed(2)} MB</span>
+      ) : null}
+    </div>
+  );
+}
+
+function formatProgressPercent(percentDone: number): number {
+  return Math.round(percentDone <= 1 ? percentDone * 100 : percentDone);
+}
+
+function renderTaskProgress(task: TaskHistory) {
+  const progress = task.progress;
+
+  if (!progress) {
+    return <ProgressText muted pulse text="准备中..." />;
+  }
+
+  switch (progress.phase) {
+    case "init":
+      return <ProgressText muted text="初始化仓库..." />;
+    case "backup": {
+      const percent = formatProgressPercent(progress.percent_done);
+      const speed = formatSpeed(progress.bytes_per_sec);
+
+      return (
+        <div className="flex min-h-8 w-[240px] max-w-full flex-col justify-center">
+          <span className="truncate">{`上传中: ${formatBytes(progress.bytes_done)} / ${formatBytes(progress.total_bytes)} (${percent}%)`}</span>
+          {speed ? (
+            <span className="truncate text-muted-foreground">{`↑${speed}`}</span>
+          ) : null}
+        </div>
+      );
+    }
+    case "forget":
+      return <ProgressText muted text="清理旧快照..." />;
+    case "stats":
+      return <ProgressText muted text="统计仓库大小..." />;
+    default:
+      return <ProgressText muted pulse text="处理中..." />;
+  }
+}
+
+function ProgressText({ text, muted, pulse }: { text: string; muted?: boolean; pulse?: boolean }) {
+  return (
+    <div className={cn("flex min-h-8 items-center", muted && "text-muted-foreground", pulse && "animate-pulse")}>
+      {text}
     </div>
   );
 }

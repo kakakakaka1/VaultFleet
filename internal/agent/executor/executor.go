@@ -49,7 +49,19 @@ type ExecutorConfig struct {
 	BackupDirs []string
 	Excludes   []string
 	Retention  RetentionPolicy
+	RcloneArgs map[string]string
 }
+
+type BackupProgress struct {
+	PercentDone float64
+	TotalFiles  int64
+	FilesDone   int64
+	TotalBytes  int64
+	BytesDone   int64
+	CurrentFile string
+}
+
+type ProgressCallback func(phase string, progress *BackupProgress)
 
 type resticExecutor interface {
 	InitRepo(ctx context.Context) error
@@ -58,6 +70,10 @@ type resticExecutor interface {
 	ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
 	RepositorySize(ctx context.Context) (int64, error)
 	RestoreSnapshot(ctx context.Context, snapshotID, targetPath string, includePaths []string) error
+}
+
+type resticExecutorWithProgress interface {
+	RunBackupWithProgress(ctx context.Context, dirs []string, excludes []string, progressFn func(BackupProgress)) (string, error)
 }
 
 type Executor struct {
@@ -70,14 +86,26 @@ type Executor struct {
 func NewExecutor(cfg ExecutorConfig) *Executor {
 	return &Executor{
 		restic: ResticRunner{
-			RcloneConfPath: filepath.Join(cfg.ConfigDir, "rclone.conf"),
-			PasswordFile:   filepath.Join(cfg.ConfigDir, ".restic-password"),
-			RepoPath:       cfg.RepoPath,
+			RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
+			PasswordFile:    filepath.Join(cfg.ConfigDir, ".restic-password"),
+			RepoPath:        cfg.RepoPath,
+			RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
 		},
 		backupDirs: append([]string(nil), cfg.BackupDirs...),
 		excludes:   append([]string(nil), cfg.Excludes...),
 		retention:  cfg.Retention,
 	}
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	copied := make(map[string]string, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
 }
 
 func (e *Executor) RunBackupJob(ctx context.Context) (result TaskResult) {
@@ -129,4 +157,79 @@ func (e *Executor) RunBackupJob(ctx context.Context) (result TaskResult) {
 		result.SnapshotID = latest.ID
 	}
 	return result
+}
+
+func (e *Executor) RunBackupJobWithProgress(ctx context.Context, progressFn ProgressCallback) (result TaskResult) {
+	start := time.Now()
+	result = TaskResult{
+		Type:   "backup",
+		Status: "failed",
+	}
+	defer func() {
+		result.DurationMs = time.Since(start).Milliseconds()
+	}()
+
+	emitProgress(progressFn, "init", nil)
+	if err := e.restic.InitRepo(ctx); err != nil {
+		result.ErrorLog = "init: " + err.Error()
+		return result
+	}
+
+	emitProgress(progressFn, "backup", nil)
+	if progressRunner, ok := e.restic.(resticExecutorWithProgress); ok {
+		var resticProgressFn func(BackupProgress)
+		if progressFn != nil {
+			resticProgressFn = func(progress BackupProgress) {
+				progressCopy := progress
+				emitProgress(progressFn, "backup", &progressCopy)
+			}
+		}
+		if _, err := progressRunner.RunBackupWithProgress(ctx, e.backupDirs, e.excludes, resticProgressFn); err != nil {
+			result.ErrorLog = "backup: " + err.Error()
+			return result
+		}
+	} else if _, err := e.restic.RunBackup(ctx, e.backupDirs, e.excludes); err != nil {
+		result.ErrorLog = "backup: " + err.Error()
+		return result
+	}
+
+	emitProgress(progressFn, "forget", nil)
+	if err := e.restic.RunForget(ctx, e.retention); err != nil {
+		result.ErrorLog = "forget: " + err.Error()
+		return result
+	}
+
+	emitProgress(progressFn, "stats", nil)
+	snapshots, err := e.restic.ListSnapshots(ctx)
+	if err != nil {
+		result.ErrorLog = "snapshots: " + err.Error()
+		return result
+	}
+
+	repoSize, err := e.restic.RepositorySize(ctx)
+	if err != nil {
+		result.ErrorLog = "stats: " + err.Error()
+		return result
+	}
+
+	result.Status = "success"
+	result.ErrorLog = ""
+	result.Snapshots = append([]SnapshotInfo(nil), snapshots...)
+	result.RepoSize = repoSize
+	if len(snapshots) > 0 {
+		latest := snapshots[0]
+		for _, snapshot := range snapshots[1:] {
+			if snapshot.Time.After(latest.Time) {
+				latest = snapshot
+			}
+		}
+		result.SnapshotID = latest.ID
+	}
+	return result
+}
+
+func emitProgress(progressFn ProgressCallback, phase string, progress *BackupProgress) {
+	if progressFn != nil {
+		progressFn(phase, progress)
+	}
 }

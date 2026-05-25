@@ -19,9 +19,10 @@ const defaultTaskListLimit = 50
 const maxTaskListLimit = 200
 
 type TaskHandler struct {
-	DB       *db.Database
-	Hub      CommandHub
-	Commands *commands.Service
+	DB             *db.Database
+	Hub            CommandHub
+	Commands       *commands.Service
+	ProgressGetter func(agentID string, messageID string) *protocol.BackupProgressPayload
 }
 
 type CommandHub interface {
@@ -30,24 +31,25 @@ type CommandHub interface {
 }
 
 type taskResponse struct {
-	ID            string     `json:"id"`
-	AgentID       string     `json:"agent_id"`
-	Type          string     `json:"type"`
-	Status        string     `json:"status"`
-	SnapshotID    string     `json:"snapshot_id"`
-	MessageID     string     `json:"message_id,omitempty"`
-	CommandID     string     `json:"command_id,omitempty"`
-	PolicyID      string     `json:"policy_id,omitempty"`
-	StorageID     string     `json:"storage_id,omitempty"`
-	StartedAt     *time.Time `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at"`
-	DurationMs    int64      `json:"duration_ms"`
-	RepoSize      int64      `json:"repo_size"`
-	RepoSizeBytes int64      `json:"repository_size_bytes"`
-	ErrorLog      string     `json:"error_log,omitempty"`
-	Error         string     `json:"error,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID            string                          `json:"id"`
+	AgentID       string                          `json:"agent_id"`
+	Type          string                          `json:"type"`
+	Status        string                          `json:"status"`
+	SnapshotID    string                          `json:"snapshot_id"`
+	MessageID     string                          `json:"message_id,omitempty"`
+	CommandID     string                          `json:"command_id,omitempty"`
+	PolicyID      string                          `json:"policy_id,omitempty"`
+	StorageID     string                          `json:"storage_id,omitempty"`
+	StartedAt     *time.Time                      `json:"started_at"`
+	FinishedAt    *time.Time                      `json:"finished_at"`
+	DurationMs    int64                           `json:"duration_ms"`
+	RepoSize      int64                           `json:"repo_size"`
+	RepoSizeBytes int64                           `json:"repository_size_bytes"`
+	ErrorLog      string                          `json:"error_log,omitempty"`
+	Error         string                          `json:"error,omitempty"`
+	Progress      *protocol.BackupProgressPayload `json:"progress,omitempty"`
+	CreatedAt     time.Time                       `json:"created_at"`
+	UpdatedAt     time.Time                       `json:"updated_at"`
 }
 
 func NewTaskHandler(database *db.Database, hub CommandHub) *TaskHandler {
@@ -135,9 +137,23 @@ func (h *TaskHandler) List(c *gin.Context) {
 
 	responses := make([]taskResponse, 0, len(histories))
 	for _, history := range histories {
-		responses = append(responses, newTaskResponse(history))
+		response := newTaskResponse(history)
+		if h.ProgressGetter != nil && taskCanIncludeProgress(history) {
+			response.Progress = h.ProgressGetter(history.AgentID, history.MessageID)
+		}
+		responses = append(responses, response)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "data": responses})
+}
+
+func taskCanIncludeProgress(history db.TaskHistory) bool {
+	if history.Type != "backup" {
+		return false
+	}
+	if history.MessageID == "" {
+		return false
+	}
+	return history.Status == commands.TaskStatusRunning || history.Status == commands.TaskStatusPending
 }
 
 func parseTaskLimit(raw string) int {

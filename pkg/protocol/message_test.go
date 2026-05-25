@@ -100,6 +100,43 @@ func TestPolicyPushPayload(t *testing.T) {
 	assert.Equal(t, 6, parsed.Retention.KeepMonthly)
 }
 
+func TestStorageConfigRcloneArgsOmitsWhenNil(t *testing.T) {
+	storage := StorageConfig{
+		RcloneType:   "s3",
+		RcloneConfig: map[string]string{"provider": "Cloudflare"},
+		RepoPath:     "vaultfleet/agent-001",
+	}
+
+	data, err := json.Marshal(storage)
+	require.NoError(t, err)
+
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(data, &fields))
+	assert.NotContains(t, fields, "rclone_args")
+}
+
+func TestStorageConfigRcloneArgsIncludesWhenSet(t *testing.T) {
+	storage := StorageConfig{
+		RcloneType:   "s3",
+		RcloneConfig: map[string]string{"provider": "Cloudflare"},
+		RepoPath:     "vaultfleet/agent-001",
+		RcloneArgs: map[string]string{
+			"transfers": "8",
+			"s3-acl":    "private",
+		},
+	}
+
+	data, err := json.Marshal(storage)
+	require.NoError(t, err)
+
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(data, &fields))
+	assert.Equal(t, map[string]any{
+		"transfers": "8",
+		"s3-acl":    "private",
+	}, fields["rclone_args"])
+}
+
 func TestPolicyAckPayload(t *testing.T) {
 	ack := PolicyAckPayload{
 		AgentID: "agent-001",
@@ -118,6 +155,39 @@ func TestBackupNowPayload(t *testing.T) {
 
 	_, parsed := roundTripPayload[BackupNowPayload](t, TypeBackupNow, backupNow)
 	assert.Equal(t, "agent-002", parsed.AgentID)
+}
+
+func TestBackupProgressPayloadMarshalsExpectedKeys(t *testing.T) {
+	progress := BackupProgressPayload{
+		AgentID:     "agent-002",
+		Phase:       "uploading",
+		PercentDone: 42.5,
+		TotalFiles:  100,
+		FilesDone:   42,
+		TotalBytes:  104857600,
+		BytesDone:   44564480,
+		BytesPerSec: 524288,
+		CurrentFile: "/var/lib/app/data.db",
+	}
+
+	msg, parsed := roundTripPayload[BackupProgressPayload](t, TypeBackupProgress, progress)
+	assert.Equal(t, TypeBackupProgress, msg.Type)
+	assert.Equal(t, progress, *parsed)
+
+	data, err := json.Marshal(progress)
+	require.NoError(t, err)
+
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(data, &fields))
+	assert.Contains(t, fields, "agent_id")
+	assert.Contains(t, fields, "phase")
+	assert.Contains(t, fields, "percent_done")
+	assert.Contains(t, fields, "total_files")
+	assert.Contains(t, fields, "files_done")
+	assert.Contains(t, fields, "total_bytes")
+	assert.Contains(t, fields, "bytes_done")
+	assert.Contains(t, fields, "bytes_per_sec")
+	assert.Contains(t, fields, "current_file")
 }
 
 func TestTaskResultPayload(t *testing.T) {
@@ -316,6 +386,7 @@ func TestAllMessageTypeConstants(t *testing.T) {
 		TypeDirSizeResp,
 		TypeVersionInfo,
 		TypeUpdateAgent,
+		TypeBackupProgress,
 	}
 	expected := []string{
 		"heartbeat",
@@ -338,10 +409,11 @@ func TestAllMessageTypeConstants(t *testing.T) {
 		"dir_size_resp",
 		"version_info",
 		"update_agent",
+		"backup_progress",
 	}
 
 	assert.Equal(t, expected, types)
-	assert.Len(t, types, 20)
+	assert.Len(t, types, 21)
 	seen := make(map[string]bool)
 	for _, typ := range types {
 		assert.NotEmpty(t, typ)

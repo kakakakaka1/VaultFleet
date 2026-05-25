@@ -113,6 +113,7 @@ func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options
 
 	hub := ws.NewHub()
 	bus := events.NewBus()
+	progressCache := ws.NewBackupProgressCache()
 	commandService := commands.NewService(database, hub)
 	api.SubscribeAgentStateEvents(database, bus)
 	notify.NewDispatcher(database, bus).Start()
@@ -125,6 +126,7 @@ func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options
 		nil,
 		api.NewTaskResultProcessor(database, commandService),
 	)
+	wsHandler.ProgressCache = progressCache
 	wsHandler.PolicyAckProcessor = api.NewPolicyAckProcessor(database, commandService)
 	wsHandler.SnapshotListResponseProcessor = api.NewSnapshotListResponseProcessor(database, commandService)
 	policyPusher := api.NewPolicyChangedPusher(database, hub, policyLookup)
@@ -140,13 +142,14 @@ func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options
 	go commandService.RunTimeoutScanner(ctx, options.commandTimeoutScanInterval)
 	bus.Subscribe(events.PolicyChanged, policyPusher.Handle)
 	router := api.NewRouter(api.RouterConfig{
-		Database:       database,
-		Hub:            hub,
-		CommandService: commandService,
-		EventBus:       bus,
-		AgentWebSocket: wsHandler.HandleWebSocket,
-		Version:        version,
-		LogBuf:         logRing,
+		Database:           database,
+		Hub:                hub,
+		CommandService:     commandService,
+		EventBus:           bus,
+		AgentWebSocket:     wsHandler.HandleWebSocket,
+		TaskProgressGetter: progressCache.Get,
+		Version:            version,
+		LogBuf:             logRing,
 	})
 
 	return masterRuntime{

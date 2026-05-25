@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
@@ -279,6 +282,59 @@ func TestRuntimeSnapshotListResponseCompletesDurableCommandWithoutWaiter(t *test
 	assert.Equal(t, int64(8192), snapshot.Size)
 }
 
+func TestBuildRuntimeSharesBackupProgressCacheWithTaskList(t *testing.T) {
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := db.Agent{Name: "Progress Agent", AgentToken: "progress-token", Status: "online"}
+	require.NoError(t, database.DB.Create(&agent).Error)
+	now := time.Date(2026, 5, 25, 9, 0, 0, 0, time.UTC)
+	startedAt := now.Add(-time.Minute)
+	history := db.TaskHistory{
+		AgentID:   agent.ID,
+		Type:      "backup",
+		Status:    commands.TaskStatusRunning,
+		MessageID: "backup-progress-msg",
+		CommandID: "cmd-progress",
+		StartedAt: &startedAt,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, database.DB.Create(&history).Error)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runtime := buildRuntime(ctx, database, nil)
+	require.NotNil(t, runtime.wsHandler.ProgressCache)
+	runtime.wsHandler.ProgressCache.Set(agent.ID, history.MessageID, &protocol.BackupProgressPayload{
+		AgentID:     agent.ID,
+		Phase:       "backup",
+		PercentDone: 52.5,
+		FilesDone:   21,
+		TotalFiles:  40,
+		BytesDone:   2048,
+		TotalBytes:  4096,
+		BytesPerSec: 1024,
+		CurrentFile: "/srv/current.db",
+	})
+
+	cookie := initMasterRuntimeSession(t, runtime.router)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks?agent_id="+agent.ID+"&limit=1", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	runtime.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseMasterRuntimeJSON(t, w)
+	data := requireMasterRuntimeList(t, body["data"])
+	require.Len(t, data, 1)
+	task := requireMasterRuntimeMap(t, data[0])
+	progress := requireMasterRuntimeMap(t, task["progress"])
+	assert.Equal(t, agent.ID, progress["agent_id"])
+	assert.Equal(t, "backup", progress["phase"])
+	assert.Equal(t, 52.5, progress["percent_done"])
+	assert.Equal(t, float64(2048), progress["bytes_done"])
+}
+
 func TestRuntimeStartsCommandTimeoutScanner(t *testing.T) {
 	database, err := db.New(t.TempDir())
 	require.NoError(t, err)
@@ -400,4 +456,58 @@ func masterPolicyAckMessage(t *testing.T, messageID string, agentID string) *pro
 	require.NoError(t, err)
 	msg.ID = messageID
 	return msg
+}
+
+func initMasterRuntimeSession(t *testing.T, router http.Handler) *http.Cookie {
+	t.Helper()
+
+	w := postMasterRuntimeJSON(t, router, "/api/auth/init", map[string]string{
+		"username": "admin",
+		"password": "secret123",
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == "session" {
+			return cookie
+		}
+	}
+	t.Fatalf("session cookie not found in response cookies: %v", w.Result().Cookies())
+	return nil
+}
+
+func postMasterRuntimeJSON(t *testing.T, router http.Handler, path string, body map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	payload, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+func parseMasterRuntimeJSON(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	return body
+}
+
+func requireMasterRuntimeMap(t *testing.T, value any) map[string]any {
+	t.Helper()
+
+	result, ok := value.(map[string]any)
+	require.True(t, ok, "expected map, got %T", value)
+	return result
+}
+
+func requireMasterRuntimeList(t *testing.T, value any) []any {
+	t.Helper()
+
+	result, ok := value.([]any)
+	require.True(t, ok, "expected list, got %T", value)
+	return result
 }

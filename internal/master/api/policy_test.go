@@ -81,6 +81,115 @@ func TestCreatePolicy(t *testing.T) {
 	assert.NotEmpty(t, stored.ResticPassword)
 }
 
+func TestCreatePolicyWithRclone(t *testing.T) {
+	setup := setupTestPolicyAPI(t)
+	agent := createPolicyTestAgent(t, setup.database)
+	storage := createPolicyTestStorage(t, setup.database)
+	rcloneArgs := map[string]string{
+		"transfers":     "4",
+		"tpslimit":      "2.5",
+		"retries-sleep": "10s",
+	}
+
+	w := postAnyJSON(t, setup.router, "/api/policies", map[string]any{
+		"agent_id":    agent.ID,
+		"storage_id":  storage.ID,
+		"backup_dirs": []string{"/etc"},
+		"schedule":    "0 3 * * *",
+		"retention":   map[string]any{"keep_last": 3},
+		"rclone_args": rcloneArgs,
+	})
+
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	responseArgs := requireMap(t, body["rclone_args"])
+	assert.Equal(t, "4", responseArgs["transfers"])
+	assert.Equal(t, "2.5", responseArgs["tpslimit"])
+	assert.Equal(t, "10s", responseArgs["retries-sleep"])
+
+	var stored db.BackupPolicy
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", body["id"]).Error)
+	assert.JSONEq(t, `{"transfers":"4","tpslimit":"2.5","retries-sleep":"10s"}`, stored.RcloneArgs)
+
+	payload, err := policyPushPayload(setup.database, stored, storage)
+	require.NoError(t, err)
+	assert.Equal(t, rcloneArgs, payload.Storage.RcloneArgs)
+}
+
+func TestCreatePolicyRejectsInvalidRcloneArgs(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  map[string]string
+		error string
+	}{
+		{
+			name:  "leading dashes",
+			args:  map[string]string{"--transfers": "4"},
+			error: "invalid rclone_args",
+		},
+		{
+			name:  "unsupported option",
+			args:  map[string]string{"bwlimit": "10M"},
+			error: "invalid rclone_args",
+		},
+		{
+			name:  "invalid positive integer",
+			args:  map[string]string{"transfers": "0"},
+			error: "invalid rclone_args",
+		},
+		{
+			name:  "invalid duration",
+			args:  map[string]string{"timeout": "not-a-duration"},
+			error: "invalid rclone_args",
+		},
+		{
+			name:  "whitespace injection",
+			args:  map[string]string{"timeout": "10s --config /tmp/other.conf"},
+			error: "invalid rclone_args",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setup := setupTestPolicyAPI(t)
+			agent := createPolicyTestAgent(t, setup.database)
+			storage := createPolicyTestStorage(t, setup.database)
+
+			w := postAnyJSON(t, setup.router, "/api/policies", map[string]any{
+				"agent_id":    agent.ID,
+				"storage_id":  storage.ID,
+				"backup_dirs": []string{"/etc"},
+				"schedule":    "0 3 * * *",
+				"retention":   map[string]any{"keep_last": 3},
+				"rclone_args": tt.args,
+			})
+
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			body := parseJSON(t, w)
+			assert.Contains(t, body["error"], tt.error)
+		})
+	}
+}
+
+func TestCreatePolicyWithoutRclone(t *testing.T) {
+	setup := setupTestPolicyAPI(t)
+	agent := createPolicyTestAgent(t, setup.database)
+	storage := createPolicyTestStorage(t, setup.database)
+
+	created := createPolicy(t, setup.router, agent.ID, storage.ID)
+	responseArgs := requireMap(t, created["rclone_args"])
+	assert.Empty(t, responseArgs)
+
+	var stored db.BackupPolicy
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", created["id"]).Error)
+	assert.Empty(t, stored.RcloneArgs)
+
+	payload, err := policyPushPayload(setup.database, stored, storage)
+	require.NoError(t, err)
+	assert.NotNil(t, payload.Storage.RcloneArgs)
+	assert.Empty(t, payload.Storage.RcloneArgs)
+}
+
 func TestCreatePolicyPublishesEvent(t *testing.T) {
 	setup := setupTestPolicyAPI(t)
 	agent := createPolicyTestAgent(t, setup.database)
@@ -244,6 +353,60 @@ func TestUpdatePolicyMarksSyncedFalse(t *testing.T) {
 	assert.Equal(t, `["/var/lib"]`, stored.BackupDirs)
 	assert.Equal(t, `["cache"]`, stored.ExcludePatterns)
 	assert.JSONEq(t, `{"keep_daily":2,"keep_last":5}`, stored.Retention)
+}
+
+func TestUpdatePolicyRclone(t *testing.T) {
+	setup := setupTestPolicyAPI(t)
+	agent := createPolicyTestAgent(t, setup.database)
+	storage := createPolicyTestStorage(t, setup.database)
+	created := createPolicy(t, setup.router, agent.ID, storage.ID)
+	id := created["id"].(string)
+
+	w := putJSON(t, setup.router, "/api/policies/"+id, map[string]any{
+		"rclone_args": map[string]string{
+			"retries":           "3",
+			"low-level-retries": "10",
+			"timeout":           "30s",
+		},
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	responseArgs := requireMap(t, body["rclone_args"])
+	assert.Equal(t, "3", responseArgs["retries"])
+	assert.Equal(t, "10", responseArgs["low-level-retries"])
+	assert.Equal(t, "30s", responseArgs["timeout"])
+
+	var stored db.BackupPolicy
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
+	assert.JSONEq(t, `{"retries":"3","low-level-retries":"10","timeout":"30s"}`, stored.RcloneArgs)
+
+	w = putJSON(t, setup.router, "/api/policies/"+id, map[string]any{
+		"rclone_args": map[string]string{},
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body = parseJSON(t, w)
+	responseArgs = requireMap(t, body["rclone_args"])
+	assert.Empty(t, responseArgs)
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
+	assert.JSONEq(t, `{}`, stored.RcloneArgs)
+}
+
+func TestUpdatePolicyRejectsInvalidRcloneArgs(t *testing.T) {
+	setup := setupTestPolicyAPI(t)
+	agent := createPolicyTestAgent(t, setup.database)
+	storage := createPolicyTestStorage(t, setup.database)
+	created := createPolicy(t, setup.router, agent.ID, storage.ID)
+	id := created["id"].(string)
+
+	w := putJSON(t, setup.router, "/api/policies/"+id, map[string]any{
+		"rclone_args": map[string]string{"retries": "-1"},
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	assert.Contains(t, body["error"], "invalid rclone_args")
 }
 
 func TestUpdatePolicyPublishesEvent(t *testing.T) {

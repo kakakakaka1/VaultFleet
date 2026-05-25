@@ -33,7 +33,7 @@ func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testin
 		ConfigDir:   configDir,
 		Scheduler:   scheduler,
 		SendFunc:    sent.send,
-		BackupRunner: func(_ context.Context, cfg executor.ExecutorConfig) executor.TaskResult {
+		BackupRunnerWithProgress: func(_ context.Context, cfg executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
 			runnerCalls.Add(1)
 			runnerConfig = cfg
 			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 25, SnapshotID: "snap-1"}
@@ -100,6 +100,63 @@ func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testin
 		Retention:  executor.RetentionPolicy{KeepLast: 3, KeepDaily: 7},
 	}, runnerConfig)
 	require.Len(t, sent.snapshot(), 2)
+}
+
+func TestHandlePolicyPushPassesRcloneArgs(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	scheduler := &recordingScheduler{}
+	sent := &sentMessages{}
+	var runnerConfigs []executor.ExecutorConfig
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		Scheduler:   scheduler,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(_ context.Context, cfg executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
+			runnerConfigs = append(runnerConfigs, cfg)
+			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 10}
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypePolicyPush, protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RcloneType: "s3",
+			RcloneConfig: map[string]string{
+				"provider": "Other",
+			},
+			RepoPath: "bucket/agent-1",
+			RcloneArgs: map[string]string{
+				"transfers":        "8",
+				"checkers":         "16",
+				"s3-upload-cutoff": "128M",
+			},
+		},
+		ResticPassword: "secret-password",
+		BackupDirs:     []string{"/srv"},
+		Schedule:       "0 4 * * *",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	require.Len(t, scheduler.updates, 1)
+	require.NotNil(t, scheduler.updates[0].fn)
+
+	scheduler.updates[0].fn()
+	require.Len(t, runnerConfigs, 1)
+	wantRcloneArgs := map[string]string{
+		"transfers":        "8",
+		"checkers":         "16",
+		"s3-upload-cutoff": "128M",
+	}
+	require.Equal(t, wantRcloneArgs, runnerConfigs[0].RcloneArgs)
+
+	runnerConfigs[0].RcloneArgs["transfers"] = "99"
+	scheduler.updates[0].fn()
+
+	require.Len(t, runnerConfigs, 2)
+	assert.Equal(t, wantRcloneArgs, runnerConfigs[1].RcloneArgs)
 }
 
 func TestFlushPendingResultsSendsStoredResultsAndClearsOnSuccess(t *testing.T) {
@@ -458,10 +515,8 @@ func TestHandleBackupNowLoadsPolicyRunsBackupAndSendsTaskResult(t *testing.T) {
 	store := policy.NewStore(t.TempDir())
 	configDir := t.TempDir()
 	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
-		AgentID: "agent-1",
-		Storage: protocol.StorageConfig{
-			RepoPath: "repo/agent-1",
-		},
+		AgentID:         "agent-1",
+		Storage:         protocol.StorageConfig{RepoPath: "repo/agent-1"},
 		BackupDirs:      []string{"/srv", "/home"},
 		ExcludePatterns: []string{"*.tmp"},
 		Retention:       protocol.RetentionPolicy{KeepLast: 4, KeepWeekly: 2},
@@ -472,7 +527,7 @@ func TestHandleBackupNowLoadsPolicyRunsBackupAndSendsTaskResult(t *testing.T) {
 		PolicyStore: store,
 		ConfigDir:   configDir,
 		SendFunc:    sent.send,
-		BackupRunner: func(_ context.Context, cfg executor.ExecutorConfig) executor.TaskResult {
+		BackupRunnerWithProgress: func(_ context.Context, cfg executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
 			runnerConfig = cfg
 			return executor.TaskResult{
 				Type:       "backup",
@@ -511,6 +566,179 @@ func TestHandleBackupNowLoadsPolicyRunsBackupAndSendsTaskResult(t *testing.T) {
 	assert.Equal(t, result.StartedAt.Add(1500*time.Millisecond), result.FinishedAt)
 }
 
+func TestHandleBackupNowUsesLegacyBackupRunnerWhenProgressRunnerUnset(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID:    "agent-1",
+		Storage:    protocol.StorageConfig{RepoPath: "repo/agent-1"},
+		BackupDirs: []string{"/srv"},
+	}))
+	sent := &sentMessages{}
+	var calls atomic.Int32
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		BackupRunner: func(_ context.Context, cfg executor.ExecutorConfig) executor.TaskResult {
+			calls.Add(1)
+			assert.Equal(t, executor.ExecutorConfig{
+				ConfigDir:  configDir,
+				RepoPath:   "repo/agent-1",
+				BackupDirs: []string{"/srv"},
+			}, cfg)
+			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 10}
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	assert.Equal(t, int32(1), calls.Load())
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	assert.Equal(t, protocol.TypeTaskResult, messages[0].Type)
+	assert.Equal(t, msg.ID, messages[0].ID)
+}
+
+func TestBackupNowSendsProgressMessages(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID:    "agent-1",
+		Storage:    protocol.StorageConfig{RepoPath: "repo/agent-1"},
+		BackupDirs: []string{"/srv"},
+	}))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(_ context.Context, cfg executor.ExecutorConfig, progressFn executor.ProgressCallback) executor.TaskResult {
+			assert.Equal(t, executor.ExecutorConfig{
+				ConfigDir:  configDir,
+				RepoPath:   "repo/agent-1",
+				BackupDirs: []string{"/srv"},
+			}, cfg)
+			progressFn("init", nil)
+			progressFn("backup", &executor.BackupProgress{
+				PercentDone: 50,
+				TotalFiles:  4,
+				FilesDone:   2,
+				TotalBytes:  1000,
+				BytesDone:   500,
+				CurrentFile: "/srv/db.sqlite",
+			})
+			progressFn("backup", &executor.BackupProgress{
+				PercentDone: 75,
+				TotalFiles:  4,
+				FilesDone:   3,
+				TotalBytes:  1000,
+				BytesDone:   750,
+				CurrentFile: "/srv/cache.db",
+			})
+			time.Sleep(10 * time.Millisecond)
+			progressFn("stats", &executor.BackupProgress{
+				PercentDone: 100,
+				TotalFiles:  4,
+				FilesDone:   4,
+				TotalBytes:  1000,
+				BytesDone:   1000,
+				CurrentFile: "/srv/final.db",
+			})
+			return executor.TaskResult{
+				Type:       "backup",
+				Status:     "success",
+				SnapshotID: "snap-1",
+				DurationMs: 1500,
+			}
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	messages := sent.snapshot()
+	require.Len(t, messages, 4)
+	assert.Equal(t, protocol.TypeBackupProgress, messages[0].Type)
+	assert.Equal(t, msg.ID, messages[0].ID)
+	initProgress, err := protocol.ParsePayload[protocol.BackupProgressPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", initProgress.AgentID)
+	assert.Equal(t, "init", initProgress.Phase)
+
+	assert.Equal(t, protocol.TypeBackupProgress, messages[1].Type)
+	assert.Equal(t, msg.ID, messages[1].ID)
+	backupProgress, err := protocol.ParsePayload[protocol.BackupProgressPayload](&messages[1])
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", backupProgress.AgentID)
+	assert.Equal(t, "backup", backupProgress.Phase)
+	assert.Equal(t, float64(50), backupProgress.PercentDone)
+	assert.Equal(t, int64(4), backupProgress.TotalFiles)
+	assert.Equal(t, int64(2), backupProgress.FilesDone)
+	assert.Equal(t, int64(1000), backupProgress.TotalBytes)
+	assert.Equal(t, int64(500), backupProgress.BytesDone)
+	assert.Equal(t, "/srv/db.sqlite", backupProgress.CurrentFile)
+
+	assert.Equal(t, protocol.TypeBackupProgress, messages[2].Type)
+	assert.Equal(t, msg.ID, messages[2].ID)
+	statsProgress, err := protocol.ParsePayload[protocol.BackupProgressPayload](&messages[2])
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", statsProgress.AgentID)
+	assert.Equal(t, "stats", statsProgress.Phase)
+	assert.Equal(t, float64(100), statsProgress.PercentDone)
+	assert.Equal(t, int64(4), statsProgress.TotalFiles)
+	assert.Equal(t, int64(4), statsProgress.FilesDone)
+	assert.Equal(t, int64(1000), statsProgress.TotalBytes)
+	assert.Equal(t, int64(1000), statsProgress.BytesDone)
+	assert.Positive(t, statsProgress.BytesPerSec)
+	assert.Equal(t, "/srv/final.db", statsProgress.CurrentFile)
+
+	assert.Equal(t, protocol.TypeTaskResult, messages[3].Type)
+	assert.Equal(t, msg.ID, messages[3].ID)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[3])
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", result.AgentID)
+	assert.Equal(t, "backup", result.TaskType)
+	assert.Equal(t, "success", result.Status)
+	assert.Equal(t, "snap-1", result.SnapshotID)
+}
+
+func TestBackupProgressCallbackSendsFirstMeasuredProgressAfterPhaseMarker(t *testing.T) {
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{SendFunc: sent.send})
+	callback := handler.backupProgressCallback("backup-msg-1", "agent-1")
+
+	callback("backup", nil)
+	callback("backup", &executor.BackupProgress{
+		PercentDone: 25,
+		TotalFiles:  4,
+		FilesDone:   1,
+		TotalBytes:  1000,
+		BytesDone:   250,
+		CurrentFile: "/srv/first.db",
+	})
+	callback("backup", &executor.BackupProgress{
+		PercentDone: 50,
+		TotalFiles:  4,
+		FilesDone:   2,
+		TotalBytes:  1000,
+		BytesDone:   500,
+		CurrentFile: "/srv/second.db",
+	})
+
+	messages := sent.snapshot()
+	require.Len(t, messages, 2)
+	firstMeasured, err := protocol.ParsePayload[protocol.BackupProgressPayload](&messages[1])
+	require.NoError(t, err)
+	assert.Equal(t, "backup", firstMeasured.Phase)
+	assert.Equal(t, float64(25), firstMeasured.PercentDone)
+	assert.Equal(t, int64(250), firstMeasured.BytesDone)
+	assert.Equal(t, "/srv/first.db", firstMeasured.CurrentFile)
+}
+
 func TestHandleBackupNowUsesConfiguredAgentIDWhenRequestAndPolicyOmitIt(t *testing.T) {
 	store := policy.NewStore(t.TempDir())
 	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
@@ -522,7 +750,7 @@ func TestHandleBackupNowUsesConfiguredAgentIDWhenRequestAndPolicyOmitIt(t *testi
 		ConfigDir:   t.TempDir(),
 		AgentID:     "agent-1",
 		SendFunc:    sent.send,
-		BackupRunner: func(context.Context, executor.ExecutorConfig) executor.TaskResult {
+		BackupRunnerWithProgress: func(context.Context, executor.ExecutorConfig, executor.ProgressCallback) executor.TaskResult {
 			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 10}
 		},
 	})
@@ -544,6 +772,10 @@ func TestHandleBackupNowPreventsOverlappingRuns(t *testing.T) {
 		AgentID: "agent-1",
 		Storage: protocol.StorageConfig{
 			RepoPath: "repo/agent-1",
+			RcloneArgs: map[string]string{
+				"transfers": "2",
+				"tpslimit":  "4",
+			},
 		},
 	}))
 	started := make(chan struct{}, 1)
@@ -555,7 +787,7 @@ func TestHandleBackupNowPreventsOverlappingRuns(t *testing.T) {
 		PolicyStore: store,
 		ConfigDir:   t.TempDir(),
 		SendFunc:    sent.send,
-		BackupRunner: func(context.Context, executor.ExecutorConfig) executor.TaskResult {
+		BackupRunnerWithProgress: func(context.Context, executor.ExecutorConfig, executor.ProgressCallback) executor.TaskResult {
 			calls.Add(1)
 			started <- struct{}{}
 			<-release
@@ -628,6 +860,10 @@ func TestHandleBackupNowPersistsPendingResultWhenSendFails(t *testing.T) {
 		AgentID: "agent-1",
 		Storage: protocol.StorageConfig{
 			RepoPath: "repo/agent-1",
+			RcloneArgs: map[string]string{
+				"transfers": "2",
+				"tpslimit":  "4",
+			},
 		},
 	}))
 	handler := NewHandler(HandlerConfig{
@@ -636,7 +872,7 @@ func TestHandleBackupNowPersistsPendingResultWhenSendFails(t *testing.T) {
 		SendFunc: func(protocol.Message) error {
 			return errors.New("offline")
 		},
-		BackupRunner: func(context.Context, executor.ExecutorConfig) executor.TaskResult {
+		BackupRunnerWithProgress: func(context.Context, executor.ExecutorConfig, executor.ProgressCallback) executor.TaskResult {
 			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 10, SnapshotID: "snap-1"}
 		},
 	})
@@ -661,6 +897,10 @@ func TestHandleRestorePersistsPendingResultWithRequestMessageIDWhenSendFails(t *
 		AgentID: "agent-1",
 		Storage: protocol.StorageConfig{
 			RepoPath: "repo/agent-1",
+			RcloneArgs: map[string]string{
+				"transfers": "2",
+				"tpslimit":  "4",
+			},
 		},
 	}))
 	handler := NewHandler(HandlerConfig{
@@ -726,6 +966,10 @@ func TestHandleRestoreInvokesRunnerAndSendsSuccessTaskResult(t *testing.T) {
 		AgentID: "agent-1",
 		Storage: protocol.StorageConfig{
 			RepoPath: "repo/agent-1",
+			RcloneArgs: map[string]string{
+				"transfers": "2",
+				"tpslimit":  "4",
+			},
 		},
 	}))
 	sent := &sentMessages{}
@@ -754,7 +998,11 @@ func TestHandleRestoreInvokesRunnerAndSendsSuccessTaskResult(t *testing.T) {
 
 	handler.Handle(*msg)
 
-	assert.Equal(t, executor.ExecutorConfig{ConfigDir: configDir, RepoPath: "repo/agent-1"}, runnerConfig)
+	assert.Equal(t, executor.ExecutorConfig{
+		ConfigDir:  configDir,
+		RepoPath:   "repo/agent-1",
+		RcloneArgs: map[string]string{"transfers": "2", "tpslimit": "4"},
+	}, runnerConfig)
 	assert.Equal(t, "snap-1", runnerSnapshotID)
 	assert.Equal(t, "/restore/target", runnerTarget)
 	assert.Equal(t, []string{"/etc/hosts", "/srv/app"}, runnerIncludePaths)
@@ -787,6 +1035,10 @@ func TestHandleRestoreRunnerFailureSendsFailedTaskResult(t *testing.T) {
 		AgentID: "agent-1",
 		Storage: protocol.StorageConfig{
 			RepoPath: "repo/agent-1",
+			RcloneArgs: map[string]string{
+				"transfers": "2",
+				"tpslimit":  "4",
+			},
 		},
 	}))
 	sent := &sentMessages{}
@@ -862,6 +1114,10 @@ func TestHandleSnapshotListInvokesRunnerAndSendsResponseWithSameID(t *testing.T)
 		AgentID: "agent-1",
 		Storage: protocol.StorageConfig{
 			RepoPath: "repo/agent-1",
+			RcloneArgs: map[string]string{
+				"transfers": "2",
+				"tpslimit":  "4",
+			},
 		},
 	}))
 	sent := &sentMessages{}
@@ -882,7 +1138,11 @@ func TestHandleSnapshotListInvokesRunnerAndSendsResponseWithSameID(t *testing.T)
 
 	handler.Handle(*msg)
 
-	assert.Equal(t, executor.ExecutorConfig{ConfigDir: configDir, RepoPath: "repo/agent-1"}, runnerConfig)
+	assert.Equal(t, executor.ExecutorConfig{
+		ConfigDir:  configDir,
+		RepoPath:   "repo/agent-1",
+		RcloneArgs: map[string]string{"transfers": "2", "tpslimit": "4"},
+	}, runnerConfig)
 	messages := sent.snapshot()
 	require.Len(t, messages, 1)
 	assert.Equal(t, protocol.TypeSnapshotListResp, messages[0].Type)
@@ -930,6 +1190,10 @@ func TestHandleSnapshotBrowseInvokesRunnerAndSendsResponseWithSameID(t *testing.
 		AgentID: "agent-1",
 		Storage: protocol.StorageConfig{
 			RepoPath: "repo/agent-1",
+			RcloneArgs: map[string]string{
+				"transfers": "2",
+				"tpslimit":  "4",
+			},
 		},
 		BackupDirs:      []string{"/srv"},
 		ExcludePatterns: []string{"*.tmp"},
@@ -962,6 +1226,7 @@ func TestHandleSnapshotBrowseInvokesRunnerAndSendsResponseWithSameID(t *testing.
 		BackupDirs: []string{"/srv"},
 		Excludes:   []string{"*.tmp"},
 		Retention:  executor.RetentionPolicy{KeepLast: 2},
+		RcloneArgs: map[string]string{"transfers": "2", "tpslimit": "4"},
 	}, runnerConfig)
 	assert.Equal(t, "snap-1", runnerSnapshotID)
 	messages := sent.snapshot()
@@ -1122,6 +1387,48 @@ func TestHandlerDirBrowseReqSendsErrorPayload(t *testing.T) {
 	assert.Nil(t, payload.Entries)
 }
 
+func TestRunRestoreAppliesRcloneArgs(t *testing.T) {
+	configDir := t.TempDir()
+	argsFile := writeAgentFakeRestic(t, configDir, "")
+
+	err := runRestore(context.Background(), executor.ExecutorConfig{
+		ConfigDir:  configDir,
+		RepoPath:   "repo/agent-1",
+		RcloneArgs: map[string]string{"transfers": "2", "tpslimit": "4"},
+	}, "snap-1", "/restore", nil)
+
+	require.NoError(t, err)
+	assertAgentResticArgsContain(t, argsFile, "--tpslimit 4 --transfers 2")
+}
+
+func TestRunSnapshotListAppliesRcloneArgs(t *testing.T) {
+	configDir := t.TempDir()
+	argsFile := writeAgentFakeRestic(t, configDir, "[]\n")
+
+	_, err := runSnapshotList(context.Background(), executor.ExecutorConfig{
+		ConfigDir:  configDir,
+		RepoPath:   "repo/agent-1",
+		RcloneArgs: map[string]string{"transfers": "2", "tpslimit": "4"},
+	})
+
+	require.NoError(t, err)
+	assertAgentResticArgsContain(t, argsFile, "--tpslimit 4 --transfers 2")
+}
+
+func TestRunSnapshotBrowseAppliesRcloneArgs(t *testing.T) {
+	configDir := t.TempDir()
+	argsFile := writeAgentFakeRestic(t, configDir, "")
+
+	_, err := runSnapshotBrowse(context.Background(), executor.ExecutorConfig{
+		ConfigDir:  configDir,
+		RepoPath:   "repo/agent-1",
+		RcloneArgs: map[string]string{"transfers": "2", "tpslimit": "4"},
+	}, "snap-1", "/srv")
+
+	require.NoError(t, err)
+	assertAgentResticArgsContain(t, argsFile, "--tpslimit 4 --transfers 2")
+}
+
 func TestHandlerDirSizeReqSendsResponse(t *testing.T) {
 	sent := make(chan protocol.Message, 1)
 	handler := NewHandler(HandlerConfig{
@@ -1238,6 +1545,27 @@ func assertFileMode(t *testing.T, path string, want os.FileMode) {
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Equal(t, want, info.Mode().Perm())
+}
+
+func writeAgentFakeRestic(t *testing.T, dir string, stdout string) string {
+	t.Helper()
+	argsFile := filepath.Join(dir, "restic.args")
+	script := filepath.Join(dir, "restic")
+	content := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" > \"$VAULTFLEET_RESTIC_ARGS_FILE\"\n" +
+		"printf '%s' \"$VAULTFLEET_RESTIC_STDOUT\"\n"
+	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+	t.Setenv("VAULTFLEET_RESTIC_ARGS_FILE", argsFile)
+	t.Setenv("VAULTFLEET_RESTIC_STDOUT", stdout)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argsFile
+}
+
+func assertAgentResticArgsContain(t *testing.T, argsFile string, want string) {
+	t.Helper()
+	data, err := os.ReadFile(argsFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), want)
 }
 
 func fileInfo(t *testing.T, path string) os.FileInfo {

@@ -197,12 +197,12 @@ func (w *responseWaiter) finish() {
 	})
 }
 
-func (h *Hub) RemoveIfCurrent(agentID string, conn *SafeConn) bool {
+func (h *Hub) RemoveIfCurrent(agentID string, conn *SafeConn) (bool, bool) {
 	h.mu.Lock()
 	status, ok := h.agents[agentID]
 	if !ok || status == nil || status.Conn != conn {
 		h.mu.Unlock()
-		return false
+		return false, false
 	}
 	wasOnline := status.Online
 	status.Online = false
@@ -212,7 +212,7 @@ func (h *Hub) RemoveIfCurrent(agentID string, conn *SafeConn) bool {
 	if conn != nil {
 		_ = conn.Close()
 	}
-	return wasOnline
+	return true, wasOnline
 }
 
 func (h *Hub) IsOnline(agentID string) bool {

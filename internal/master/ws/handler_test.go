@@ -465,6 +465,96 @@ func TestHandler_TaskResultDispatchPublishesRawPayload(t *testing.T) {
 	}
 }
 
+func TestDispatchBackupProgressUpdatesCache(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.ProgressCache = NewBackupProgressCache()
+	msg, err := protocol.NewMessage(protocol.TypeBackupProgress, protocol.BackupProgressPayload{
+		AgentID:     "payload-agent",
+		Phase:       "backup",
+		PercentDone: 37.5,
+		TotalFiles:  20,
+		FilesDone:   8,
+		TotalBytes:  4096,
+		BytesDone:   1536,
+		BytesPerSec: 256,
+		CurrentFile: "/srv/file.txt",
+	})
+	require.NoError(t, err)
+	msg.ID = "backup-msg-1"
+
+	handler.dispatch("agent-1", *msg)
+
+	progress := handler.ProgressCache.Get("agent-1", "backup-msg-1")
+	require.NotNil(t, progress)
+	assert.Equal(t, "agent-1", progress.AgentID)
+	assert.Equal(t, "backup", progress.Phase)
+	assert.Equal(t, 37.5, progress.PercentDone)
+	assert.Equal(t, int64(1536), progress.BytesDone)
+}
+
+func TestDispatchBackupProgressIgnoresInvalidPayload(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.ProgressCache = NewBackupProgressCache()
+
+	handler.dispatch("agent-1", protocol.Message{
+		ID:      "backup-msg-1",
+		Type:    protocol.TypeBackupProgress,
+		Payload: json.RawMessage(`{"percent_done":`),
+	})
+
+	assert.Nil(t, handler.ProgressCache.Get("agent-1", "backup-msg-1"))
+}
+
+func TestDispatchBackupProgressIgnoresEmptyMessageID(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.ProgressCache = NewBackupProgressCache()
+
+	handler.dispatch("agent-1", protocol.Message{
+		Type:    protocol.TypeBackupProgress,
+		Payload: json.RawMessage(`{"agent_id":"agent-1","phase":"backup"}`),
+	})
+
+	assert.Nil(t, handler.ProgressCache.Get("agent-1", ""))
+}
+
+func TestDispatchTaskResultClearsMatchingBackupProgressCache(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	eventsCh := make(chan events.Event, 1)
+	setup.bus.Subscribe(events.TaskResult, func(event events.Event) {
+		eventsCh <- event
+	})
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.ProgressCache = NewBackupProgressCache()
+	handler.ProgressCache.Set("agent-1", "backup-msg-1", &protocol.BackupProgressPayload{
+		AgentID:     "agent-1",
+		Phase:       "backup",
+		PercentDone: 99,
+	})
+	handler.ProgressCache.Set("agent-1", "backup-msg-2", &protocol.BackupProgressPayload{
+		AgentID:     "agent-1",
+		Phase:       "backup",
+		PercentDone: 50,
+	})
+
+	handler.dispatch("agent-1", protocol.Message{
+		ID:      "backup-msg-1",
+		Type:    protocol.TypeTaskResult,
+		Payload: json.RawMessage(`{"task_type":"backup","status":"success"}`),
+	})
+
+	assert.Nil(t, handler.ProgressCache.Get("agent-1", "backup-msg-1"))
+	assert.NotNil(t, handler.ProgressCache.Get("agent-1", "backup-msg-2"))
+	select {
+	case event := <-eventsCh:
+		assert.Equal(t, events.TaskResult, event.Type)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for task result event")
+	}
+}
+
 func TestHandler_TaskResultProcessorFromConstructorRecordsHistoryAndSnapshots(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	database := setupHandlerTestDB(t)
@@ -723,10 +813,21 @@ func TestHandler_CleanupAfterMonitorOfflineDoesNotPublishDuplicateOffline(t *tes
 	monitor.scan()
 
 	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.ProgressCache = NewBackupProgressCache()
+	handler.ProgressCache.Set("agent-1", "backup-msg-1", &protocol.BackupProgressPayload{
+		AgentID: "agent-1",
+		Phase:   "backup",
+	})
+	handler.ProgressCache.Set("agent-1", "backup-msg-2", &protocol.BackupProgressPayload{
+		AgentID: "agent-1",
+		Phase:   "backup",
+	})
 	handler.cleanupConnection("agent-1", conn)
 
 	assert.Equal(t, []string{"agent-1"}, offlineEvents.snapshot())
 	assert.NotContains(t, setup.hub.GetAllAgents(), "agent-1")
+	assert.Nil(t, handler.ProgressCache.Get("agent-1", "backup-msg-1"))
+	assert.Nil(t, handler.ProgressCache.Get("agent-1", "backup-msg-2"))
 }
 
 func TestHandler_OnlinePublishPanicStillCleansRegistration(t *testing.T) {
