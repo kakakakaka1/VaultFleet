@@ -67,6 +67,7 @@ type BackupPolicy struct {
 	Schedule        string    `gorm:"type:text" json:"schedule"`
 	Retention       string    `gorm:"type:text" json:"retention"`
 	RcloneArgs      string    `gorm:"type:text" json:"rclone_args"`
+	TimeoutHours    int       `gorm:"default:6" json:"timeout_hours"`
 	Synced          bool      `gorm:"default:false" json:"synced"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`

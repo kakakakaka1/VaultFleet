@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { listTasks } from "@/services/tasks";
+import { cancelTask, listTasks } from "@/services/tasks";
 import { listAgents, backupNow } from "@/services/agents";
 import type { TaskHistory } from "@/types/task";
 import { StatusBadge } from "@/components/status-badge";
@@ -14,7 +14,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ChevronDown, ChevronUp, XCircle, Info, RefreshCw, Play } from "lucide-react";
+import { ChevronDown, ChevronUp, XCircle, Info, RefreshCw, Play, X } from "lucide-react";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { cn } from "@/lib/utils";
@@ -23,8 +23,9 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 
 export function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [backupAgentId, setBackupAgentId] = useState<string | null>(null);
+  const [cancelTaskId, setCancelTaskId] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const filters = useMemo(() => ({
@@ -57,6 +58,18 @@ export function TasksPage() {
     },
     onError: (error: any) => {
       toast.error("发起备份失败", { description: error.message });
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: (taskId: string) => cancelTask(taskId),
+    onSuccess: () => {
+      setCancelTaskId(null);
+      toast.success("取消命令已发送");
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error: any) => {
+      toast.error("取消失败", { description: error.message });
     },
   });
 
@@ -142,6 +155,7 @@ export function TasksPage() {
               <SelectItem value="success">成功</SelectItem>
               <SelectItem value="failed">失败</SelectItem>
               <SelectItem value="timeout">超时</SelectItem>
+              <SelectItem value="cancelled">已取消</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -183,7 +197,7 @@ export function TasksPage() {
                       <StatusBadge status={task.status} />
                     </TableCell>
                     <TableCell className="text-xs">
-                      {renderTaskMetricContent(task)}
+                      {renderTaskMetricContent(task, setCancelTaskId)}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {task.finished_at ? format(new Date(task.finished_at), "yyyy-MM-dd HH:mm:ss", { locale: zhCN }) : "-"}
@@ -269,6 +283,17 @@ export function TasksPage() {
         loading={backupMutation.isPending}
         variant="default"
       />
+
+      <ConfirmDialog
+        open={!!cancelTaskId}
+        onOpenChange={(open) => !open && setCancelTaskId(null)}
+        title="确认取消任务"
+        description="确认取消此任务？取消后已上传的数据不会丢失，下次备份会继续。"
+        confirmText="确认取消"
+        onConfirm={() => cancelTaskId && cancelMutation.mutate(cancelTaskId)}
+        loading={cancelMutation.isPending}
+        variant="destructive"
+      />
     </div>
   );
 }
@@ -287,14 +312,43 @@ export function formatSpeed(bytesPerSec: number): string {
   return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`;
 }
 
-export function renderTaskMetricContent(task: TaskHistory) {
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  if (hours > 0) return `${hours}:${pad(minutes)}:${pad(seconds)}`;
+  return `${minutes}:${pad(seconds)}`;
+}
+
+export function renderTaskMetricContent(task: TaskHistory, onCancel?: (taskId: string) => void) {
   if (task.status === "pending" || task.status === "running") {
-    return renderTaskProgress(task);
+    return (
+      <div className="flex items-center gap-2">
+        <div className="flex-1">{renderTaskProgress(task)}</div>
+        {onCancel && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onCancel(task.id);
+            }}
+            className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500"
+            title="取消任务"
+            aria-label="取消任务"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+    );
   }
 
   return (
     <div className="flex min-h-8 flex-col justify-center">
-      <span>{task.duration_ms ? `${(task.duration_ms / 1000).toFixed(1)}s` : "-"}</span>
+      <span>{task.duration_ms ? formatDuration(task.duration_ms) : "-"}</span>
       {task.repo_size ? (
         <span className="text-muted-foreground">{(task.repo_size / 1024 / 1024).toFixed(2)} MB</span>
       ) : null}

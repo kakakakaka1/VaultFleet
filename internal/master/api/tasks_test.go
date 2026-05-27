@@ -86,6 +86,161 @@ func TestBackupNowQueuesOfflineAgentCommand(t *testing.T) {
 	assert.Equal(t, data["message_id"], history.MessageID)
 }
 
+func TestBackupNowUsesPolicyTimeoutHours(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "offline")
+	storage := db.StorageConfig{Name: "Timeout Storage", RcloneType: "s3"}
+	require.NoError(t, setup.database.DB.Create(&storage).Error)
+	policy := db.BackupPolicy{
+		AgentID:         agent.ID,
+		StorageID:       storage.ID,
+		RepoPath:        "vaultfleet/" + agent.ID,
+		BackupDirs:      `["/etc"]`,
+		ExcludePatterns: `[]`,
+		Schedule:        "0 3 * * *",
+		Retention:       `{"keep_last":3}`,
+		TimeoutHours:    2,
+	}
+	require.NoError(t, setup.database.DB.Create(&policy).Error)
+	now := time.Date(2026, 5, 27, 9, 0, 0, 0, time.UTC)
+	setup.handler.Commands.Now = func() time.Time { return now }
+
+	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/backup-now", map[string]any{})
+
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireMap(t, body["data"])
+	var command db.AgentCommand
+	require.NoError(t, setup.database.DB.First(&command, "id = ?", data["command_id"]).Error)
+	require.NotNil(t, command.DeadlineAt)
+	assert.Equal(t, now.Add(2*time.Hour), command.DeadlineAt.UTC())
+	assert.Equal(t, policy.ID, command.PolicyID)
+	assert.Equal(t, storage.ID, command.StorageID)
+
+	var history db.TaskHistory
+	require.NoError(t, setup.database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, policy.ID, history.PolicyID)
+	assert.Equal(t, storage.ID, history.StorageID)
+}
+
+func TestCancelPendingTaskMarksCancelled(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	now := time.Now()
+
+	command := db.AgentCommand{
+		AgentID:   agent.ID,
+		Type:      protocol.TypeBackupNow,
+		Status:    commands.CommandStatusPending,
+		MessageID: "msg-1",
+	}
+	require.NoError(t, setup.database.DB.Create(&command).Error)
+
+	history := db.TaskHistory{
+		AgentID:   agent.ID,
+		Type:      "backup",
+		Status:    commands.TaskStatusPending,
+		MessageID: "msg-1",
+		CommandID: command.ID,
+		CreatedAt: now,
+	}
+	require.NoError(t, setup.database.DB.Create(&history).Error)
+
+	w := postAnyJSON(t, setup.router, "/api/tasks/"+history.ID+"/cancel", nil)
+
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+
+	var updated db.TaskHistory
+	require.NoError(t, setup.database.DB.First(&updated, "id = ?", history.ID).Error)
+	assert.Equal(t, commands.TaskStatusCancelled, updated.Status)
+	assert.NotNil(t, updated.FinishedAt)
+	assert.Empty(t, setup.hub.sent)
+}
+
+func TestCancelRunningTaskSendsWSMessage(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	setup.hub.online[agent.ID] = true
+	now := time.Now()
+
+	command := db.AgentCommand{
+		AgentID:   agent.ID,
+		Type:      protocol.TypeBackupNow,
+		Status:    commands.CommandStatusRunning,
+		MessageID: "msg-2",
+	}
+	require.NoError(t, setup.database.DB.Create(&command).Error)
+
+	history := db.TaskHistory{
+		AgentID:   agent.ID,
+		Type:      "backup",
+		Status:    commands.TaskStatusRunning,
+		MessageID: "msg-2",
+		CommandID: command.ID,
+		CreatedAt: now,
+	}
+	require.NoError(t, setup.database.DB.Create(&history).Error)
+
+	w := postAnyJSON(t, setup.router, "/api/tasks/"+history.ID+"/cancel", nil)
+
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	require.Len(t, setup.hub.sent, 1)
+	assert.Equal(t, agent.ID, setup.hub.sent[0].agentID)
+	assert.Equal(t, protocol.TypeCancelTask, setup.hub.sent[0].message.Type)
+	payload, err := protocol.ParsePayload[protocol.CancelTaskPayload](&setup.hub.sent[0].message)
+	require.NoError(t, err)
+	assert.Equal(t, agent.ID, payload.AgentID)
+	assert.Equal(t, command.MessageID, payload.MessageID)
+}
+
+func TestCancelRunningTaskReturnsUnavailableWhenHubMissing(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	history := seedCommandBackedTask(t, setup.database, agent.ID, commands.CommandStatusRunning, commands.TaskStatusRunning, "msg-no-hub")
+	setup.handler.Hub = nil
+	setup.handler.Commands.Hub = nil
+
+	w := postAnyJSON(t, setup.router, "/api/tasks/"+history.ID+"/cancel", nil)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+func TestCancelRunningTaskReturnsUnavailableWhenAgentOffline(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	history := seedCommandBackedTask(t, setup.database, agent.ID, commands.CommandStatusRunning, commands.TaskStatusRunning, "msg-offline")
+
+	w := postAnyJSON(t, setup.router, "/api/tasks/"+history.ID+"/cancel", nil)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Empty(t, setup.hub.sent)
+}
+
+func TestCancelRunningTaskReturnsUnavailableWhenSendFails(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	setup.hub.online[agent.ID] = true
+	setup.hub.sendErr = errors.New("websocket write failed")
+	history := seedCommandBackedTask(t, setup.database, agent.ID, commands.CommandStatusRunning, commands.TaskStatusRunning, "msg-send-fails")
+
+	w := postAnyJSON(t, setup.router, "/api/tasks/"+history.ID+"/cancel", nil)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Empty(t, setup.hub.sent)
+}
+
+func TestCancelCompletedTaskReturnsConflict(t *testing.T) {
+	setup := setupTasksAPI(t)
+	agent := createTasksTestAgent(t, setup.database, "online")
+	now := time.Now()
+	history := seedTaskHistory(t, setup.database, agent.ID, "backup", commands.TaskStatusSuccess, "snap-1", now)
+
+	w := postAnyJSON(t, setup.router, "/api/tasks/"+history.ID+"/cancel", nil)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Empty(t, setup.hub.sent)
+}
+
 func TestListTasksFiltersAndLimitsHistory(t *testing.T) {
 	setup := setupTasksAPI(t)
 	agentA := createTasksTestAgent(t, setup.database, "online")
@@ -374,6 +529,28 @@ func seedTaskHistoryWithMessageID(t *testing.T, database *db.Database, agentID s
 		FinishedAt: &finishedAt,
 		DurationMs: 60000,
 		CreatedAt:  createdAt,
+	}
+	require.NoError(t, database.DB.Create(&history).Error)
+	return history
+}
+
+func seedCommandBackedTask(t *testing.T, database *db.Database, agentID string, commandStatus string, taskStatus string, messageID string) db.TaskHistory {
+	t.Helper()
+
+	command := db.AgentCommand{
+		AgentID:   agentID,
+		Type:      protocol.TypeBackupNow,
+		Status:    commandStatus,
+		MessageID: messageID,
+	}
+	require.NoError(t, database.DB.Create(&command).Error)
+	history := db.TaskHistory{
+		AgentID:   agentID,
+		Type:      "backup",
+		Status:    taskStatus,
+		MessageID: messageID,
+		CommandID: command.ID,
+		CreatedAt: time.Now(),
 	}
 	require.NoError(t, database.DB.Create(&history).Error)
 	return history

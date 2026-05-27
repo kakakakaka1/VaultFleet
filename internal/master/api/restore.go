@@ -85,14 +85,26 @@ func (h *RestoreHandler) Restore(c *gin.Context) {
 		return
 	}
 
+	var timeoutHours int
+	var policyID, storageID string
+	var policy db.BackupPolicy
+	if err := h.DB.DB.Where("agent_id = ?", agentID).First(&policy).Error; err == nil {
+		timeoutHours = normalizedPolicyTimeoutHours(policy.TimeoutHours)
+		policyID = policy.ID
+		storageID = policy.StorageID
+	}
+
 	commandService := h.commandService()
 	command, err := commandService.CreateCommand(contextFromGin(c), commands.CreateCommandInput{
-		AgentID:    agentID,
-		Type:       msgType,
-		Message:    *msg,
-		TaskType:   "restore",
-		TaskState:  commands.TaskStatusPending,
-		SnapshotID: snapshotID,
+		AgentID:      agentID,
+		Type:         msgType,
+		Message:      *msg,
+		TaskType:     "restore",
+		TaskState:    commands.TaskStatusPending,
+		SnapshotID:   snapshotID,
+		PolicyID:     policyID,
+		StorageID:    storageID,
+		TimeoutHours: timeoutHours,
 	})
 	if err != nil {
 		writeErrorResponse(c, http.StatusInternalServerError, "database error")

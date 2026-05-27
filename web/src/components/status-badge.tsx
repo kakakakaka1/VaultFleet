@@ -1,7 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-type StatusType = "online" | "offline" | "success" | "failed" | "running" | "syncing" | "unsynced" | "pending" | "timeout" | "dispatched" | "succeeded" | "queued";
+type StatusType = "online" | "offline" | "success" | "failed" | "running" | "syncing" | "unsynced" | "pending" | "timeout" | "dispatched" | "succeeded" | "queued" | "cancelled";
 
 interface StatusBadgeProps {
   status: StatusType;
@@ -22,6 +22,7 @@ export function StatusBadge({ status, className }: StatusBadgeProps) {
     dispatched: { label: "已下发", className: "bg-indigo-500 hover:bg-indigo-600" },
     succeeded: { label: "成功", className: "bg-green-600 hover:bg-green-700" },
     queued: { label: "已排队", className: "bg-slate-500 hover:bg-slate-600" },
+    cancelled: { label: "已取消", className: "bg-gray-500 hover:bg-gray-600" },
   };
 
   const { label, className: statusClass } = config[status] || { label: status, className: "bg-gray-500" };

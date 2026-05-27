@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -79,6 +80,66 @@ func TestCreatePolicy(t *testing.T) {
 	assert.Equal(t, `["*.log","*.tmp"]`, stored.ExcludePatterns)
 	assert.JSONEq(t, `{"keep_last":3,"keep_daily":7,"keep_weekly":4,"keep_monthly":6}`, stored.Retention)
 	assert.NotEmpty(t, stored.ResticPassword)
+}
+
+func TestCreatePolicyDefaultsTimeoutHours(t *testing.T) {
+	setup := setupTestPolicyAPI(t)
+	agent := createPolicyTestAgent(t, setup.database)
+	storage := createPolicyTestStorage(t, setup.database)
+
+	created := createPolicy(t, setup.router, agent.ID, storage.ID)
+
+	assert.Equal(t, float64(6), created["timeout_hours"])
+
+	var stored db.BackupPolicy
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", created["id"]).Error)
+	assert.Equal(t, 6, stored.TimeoutHours)
+}
+
+func TestCreatePolicyPersistsTimeoutHours(t *testing.T) {
+	setup := setupTestPolicyAPI(t)
+	agent := createPolicyTestAgent(t, setup.database)
+	storage := createPolicyTestStorage(t, setup.database)
+
+	w := postAnyJSON(t, setup.router, "/api/policies", map[string]any{
+		"agent_id":      agent.ID,
+		"storage_id":    storage.ID,
+		"backup_dirs":   []string{"/etc"},
+		"schedule":      "0 3 * * *",
+		"retention":     map[string]any{"keep_last": 3},
+		"timeout_hours": 12,
+	})
+
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	assert.Equal(t, float64(12), body["timeout_hours"])
+
+	var stored db.BackupPolicy
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", body["id"]).Error)
+	assert.Equal(t, 12, stored.TimeoutHours)
+}
+
+func TestCreatePolicyRejectsInvalidTimeoutHours(t *testing.T) {
+	for _, timeoutHours := range []int{0, -1, 73} {
+		t.Run(strconv.Itoa(timeoutHours), func(t *testing.T) {
+			setup := setupTestPolicyAPI(t)
+			agent := createPolicyTestAgent(t, setup.database)
+			storage := createPolicyTestStorage(t, setup.database)
+
+			w := postAnyJSON(t, setup.router, "/api/policies", map[string]any{
+				"agent_id":      agent.ID,
+				"storage_id":    storage.ID,
+				"backup_dirs":   []string{"/etc"},
+				"schedule":      "0 3 * * *",
+				"retention":     map[string]any{"keep_last": 3},
+				"timeout_hours": timeoutHours,
+			})
+
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			body := parseJSON(t, w)
+			assert.Contains(t, body["error"], "timeout_hours")
+		})
+	}
 }
 
 func TestCreatePolicyWithRclone(t *testing.T) {
@@ -391,6 +452,49 @@ func TestUpdatePolicyRclone(t *testing.T) {
 	assert.Empty(t, responseArgs)
 	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
 	assert.JSONEq(t, `{}`, stored.RcloneArgs)
+}
+
+func TestUpdatePolicyTimeoutHours(t *testing.T) {
+	setup := setupTestPolicyAPI(t)
+	agent := createPolicyTestAgent(t, setup.database)
+	storage := createPolicyTestStorage(t, setup.database)
+	created := createPolicy(t, setup.router, agent.ID, storage.ID)
+	id := created["id"].(string)
+
+	w := putJSON(t, setup.router, "/api/policies/"+id, map[string]any{
+		"timeout_hours": 9,
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	assert.Equal(t, float64(9), body["timeout_hours"])
+
+	var stored db.BackupPolicy
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
+	assert.Equal(t, 9, stored.TimeoutHours)
+
+	w = getJSON(t, setup.router, "/api/policies/"+id)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body = parseJSON(t, w)
+	assert.Equal(t, float64(9), body["timeout_hours"])
+}
+
+func TestUpdatePolicyRejectsInvalidTimeoutHours(t *testing.T) {
+	for _, timeoutHours := range []int{0, -1, 73} {
+		t.Run(strconv.Itoa(timeoutHours), func(t *testing.T) {
+			setup := setupTestPolicyAPI(t)
+			agent := createPolicyTestAgent(t, setup.database)
+			storage := createPolicyTestStorage(t, setup.database)
+			created := createPolicy(t, setup.router, agent.ID, storage.ID)
+			id := created["id"].(string)
+
+			w := putJSON(t, setup.router, "/api/policies/"+id, map[string]any{"timeout_hours": timeoutHours})
+
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			body := parseJSON(t, w)
+			assert.Contains(t, body["error"], "timeout_hours")
+		})
+	}
 }
 
 func TestUpdatePolicyRejectsInvalidRcloneArgs(t *testing.T) {

@@ -31,6 +31,7 @@ const (
 	TypeVersionInfo         = "version_info"
 	TypeUpdateAgent         = "update_agent"
 	TypeBackupProgress      = "backup_progress"
+	TypeCancelTask          = "cancel_task"
 )
 
 const (
@@ -131,6 +132,12 @@ type BackupProgressPayload struct {
 	BytesDone   int64   `json:"bytes_done"`
 	BytesPerSec int64   `json:"bytes_per_sec"`
 	CurrentFile string  `json:"current_file"`
+}
+
+// CancelTaskPayload requests cancellation of a running agent task by message ID.
+type CancelTaskPayload struct {
+	AgentID   string `json:"agent_id"`
+	MessageID string `json:"message_id"`
 }
 
 // RestoreProgressPayload reports incremental restore progress from an agent.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,6 +92,7 @@ func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testin
 	assert.Equal(t, protocol.PolicyAckPayload{AgentID: "agent-1", Success: true}, *ack)
 
 	scheduler.updates[0].fn()
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
 	assert.Equal(t, int32(1), runnerCalls.Load())
 	assert.Equal(t, executor.ExecutorConfig{
 		ConfigDir:  configDir,
@@ -99,7 +101,6 @@ func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testin
 		Excludes:   []string{"*.tmp"},
 		Retention:  executor.RetentionPolicy{KeepLast: 3, KeepDaily: 7},
 	}, runnerConfig)
-	require.Len(t, sent.snapshot(), 2)
 }
 
 func TestHandlePolicyPushPassesRcloneArgs(t *testing.T) {
@@ -144,7 +145,7 @@ func TestHandlePolicyPushPassesRcloneArgs(t *testing.T) {
 	require.NotNil(t, scheduler.updates[0].fn)
 
 	scheduler.updates[0].fn()
-	require.Len(t, runnerConfigs, 1)
+	waitForMessageTypeCount(t, sent, protocol.TypeTaskResult, 1, time.Second)
 	wantRcloneArgs := map[string]string{
 		"transfers":        "8",
 		"checkers":         "16",
@@ -155,6 +156,7 @@ func TestHandlePolicyPushPassesRcloneArgs(t *testing.T) {
 	runnerConfigs[0].RcloneArgs["transfers"] = "99"
 	scheduler.updates[0].fn()
 
+	waitForMessageTypeCount(t, sent, protocol.TypeTaskResult, 2, time.Second)
 	require.Len(t, runnerConfigs, 2)
 	assert.Equal(t, wantRcloneArgs, runnerConfigs[1].RcloneArgs)
 }
@@ -219,6 +221,37 @@ func TestFlushPendingResultsKeepsUnsentResults(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	assert.Equal(t, "msg-2", pending[0].MessageID)
+}
+
+func TestPersistPendingResultConcurrentWritesKeepAllResults(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	handler := NewHandler(HandlerConfig{PolicyStore: store})
+	const count = 100
+	var wg sync.WaitGroup
+
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		i := i
+		go func() {
+			defer wg.Done()
+			handler.persistPendingResult(
+				"msg-"+strconv.Itoa(i),
+				protocol.TaskResultPayload{AgentID: "agent-1", TaskType: "backup", Status: "success", SnapshotID: "snap-" + strconv.Itoa(i)},
+			)
+		}()
+	}
+	wg.Wait()
+
+	pending, err := store.LoadPendingResults()
+	require.NoError(t, err)
+	require.Len(t, pending, count)
+	seen := make(map[string]bool, count)
+	for _, result := range pending {
+		seen[result.MessageID] = true
+	}
+	for i := 0; i < count; i++ {
+		assert.True(t, seen["msg-"+strconv.Itoa(i)], "missing pending result %d", i)
+	}
 }
 
 func TestHandlePolicyPushSendsFailureAckAndDoesNotScheduleWhenConfigWriteFails(t *testing.T) {
@@ -543,6 +576,7 @@ func TestHandleBackupNowLoadsPolicyRunsBackupAndSendsTaskResult(t *testing.T) {
 
 	handler.Handle(*msg)
 
+	resultMsg := waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
 	assert.Equal(t, executor.ExecutorConfig{
 		ConfigDir:  configDir,
 		RepoPath:   "repo/agent-1",
@@ -550,11 +584,8 @@ func TestHandleBackupNowLoadsPolicyRunsBackupAndSendsTaskResult(t *testing.T) {
 		Excludes:   []string{"*.tmp"},
 		Retention:  executor.RetentionPolicy{KeepLast: 4, KeepWeekly: 2},
 	}, runnerConfig)
-	messages := sent.snapshot()
-	require.Len(t, messages, 1)
-	assert.Equal(t, protocol.TypeTaskResult, messages[0].Type)
-	assert.Equal(t, msg.ID, messages[0].ID)
-	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[0])
+	assert.Equal(t, msg.ID, resultMsg.ID)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&resultMsg)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-1", result.AgentID)
 	assert.Equal(t, "backup", result.TaskType)
@@ -595,11 +626,9 @@ func TestHandleBackupNowUsesLegacyBackupRunnerWhenProgressRunnerUnset(t *testing
 
 	handler.Handle(*msg)
 
+	resultMsg := waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
 	assert.Equal(t, int32(1), calls.Load())
-	messages := sent.snapshot()
-	require.Len(t, messages, 1)
-	assert.Equal(t, protocol.TypeTaskResult, messages[0].Type)
-	assert.Equal(t, msg.ID, messages[0].ID)
+	assert.Equal(t, msg.ID, resultMsg.ID)
 }
 
 func TestBackupNowSendsProgressMessages(t *testing.T) {
@@ -660,6 +689,7 @@ func TestBackupNowSendsProgressMessages(t *testing.T) {
 
 	handler.Handle(*msg)
 
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
 	messages := sent.snapshot()
 	require.Len(t, messages, 4)
 	assert.Equal(t, protocol.TypeBackupProgress, messages[0].Type)
@@ -759,9 +789,8 @@ func TestHandleBackupNowUsesConfiguredAgentIDWhenRequestAndPolicyOmitIt(t *testi
 
 	handler.Handle(*msg)
 
-	messages := sent.snapshot()
-	require.Len(t, messages, 1)
-	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&messages[0])
+	resultMsg := waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&resultMsg)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-1", result.AgentID)
 }
@@ -824,6 +853,7 @@ func TestHandleBackupNowPreventsOverlappingRuns(t *testing.T) {
 	close(release)
 	<-done
 
+	waitForMessageTypeCount(t, sent, protocol.TypeTaskResult, 2, time.Second)
 	messages = sent.snapshot()
 	require.Len(t, messages, 2)
 	assert.Equal(t, msg.ID, messages[1].ID)
@@ -831,6 +861,127 @@ func TestHandleBackupNowPreventsOverlappingRuns(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "success", result.Status)
 	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestHandleBackupNowStartsAsyncAndDoesNotBlockHandle(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{RepoPath: "repo/agent-1"},
+	}))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRunner := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	defer releaseRunner()
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(context.Context, executor.ExecutorConfig, executor.ProgressCallback) executor.TaskResult {
+			close(started)
+			<-release
+			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 10}
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("backup runner did not start")
+	}
+	assert.Empty(t, sent.snapshot())
+
+	releaseRunner()
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+}
+
+func TestCancelTaskStopsRunningBackup(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID:    "agent-1",
+		Storage:    protocol.StorageConfig{RepoPath: "repo/agent-1"},
+		BackupDirs: []string{"/data"},
+		Retention:  protocol.RetentionPolicy{KeepLast: 3},
+	}))
+	started := make(chan struct{})
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(ctx context.Context, cfg executor.ExecutorConfig, progressFn executor.ProgressCallback) executor.TaskResult {
+			close(started)
+			<-ctx.Done()
+			return executor.TaskResult{Type: "backup", Status: "failed", ErrorLog: "context canceled"}
+		},
+	})
+	backupMsg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*backupMsg)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("backup runner did not start")
+	}
+
+	cancelMsg, err := protocol.NewMessage(protocol.TypeCancelTask, protocol.CancelTaskPayload{
+		AgentID:   "agent-1",
+		MessageID: backupMsg.ID,
+	})
+	require.NoError(t, err)
+	handler.Handle(*cancelMsg)
+
+	resultMsg := waitForMessageType(t, sent, protocol.TypeTaskResult, 2*time.Second)
+	payload, err := protocol.ParsePayload[protocol.TaskResultPayload](&resultMsg)
+	require.NoError(t, err)
+	assert.Equal(t, "cancelled", payload.Status)
+	assert.Equal(t, "backup", payload.TaskType)
+}
+
+func TestCancelTaskIgnoresMismatchedAgentID(t *testing.T) {
+	handler := NewHandler(HandlerConfig{AgentID: "agent-1"})
+	cancelled := make(chan struct{})
+	require.NoError(t, handler.tasks.Start("msg-1", taskTypeBackup, func(ctx context.Context) {
+		<-ctx.Done()
+		close(cancelled)
+	}))
+	defer handler.tasks.Cancel("msg-1")
+	cancelMsg, err := protocol.NewMessage(protocol.TypeCancelTask, protocol.CancelTaskPayload{
+		AgentID:   "agent-2",
+		MessageID: "msg-1",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*cancelMsg)
+
+	assertNotClosed(t, cancelled, 20*time.Millisecond)
+}
+
+func TestCancelTaskIgnoresEmptyMessageID(t *testing.T) {
+	handler := NewHandler(HandlerConfig{AgentID: "agent-1"})
+	cancelled := make(chan struct{})
+	require.NoError(t, handler.tasks.Start("", taskTypeBackup, func(ctx context.Context) {
+		<-ctx.Done()
+		close(cancelled)
+	}))
+	defer handler.tasks.Cancel("")
+	cancelMsg, err := protocol.NewMessage(protocol.TypeCancelTask, protocol.CancelTaskPayload{
+		AgentID: "agent-1",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*cancelMsg)
+
+	assertNotClosed(t, cancelled, 20*time.Millisecond)
 }
 
 func TestHandleBackupNowParseFailureUsesRequestMessageID(t *testing.T) {
@@ -881,6 +1032,10 @@ func TestHandleBackupNowPersistsPendingResultWhenSendFails(t *testing.T) {
 
 	handler.Handle(*msg)
 
+	require.Eventually(t, func() bool {
+		pending, err := store.LoadPendingResults()
+		return err == nil && len(pending) == 1
+	}, time.Second, 10*time.Millisecond)
 	pending, err := store.LoadPendingResults()
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
@@ -924,6 +1079,10 @@ func TestHandleRestorePersistsPendingResultWithRequestMessageIDWhenSendFails(t *
 
 	handler.Handle(*msg)
 
+	require.Eventually(t, func() bool {
+		pending, err := store.LoadPendingResults()
+		return err == nil && len(pending) == 1
+	}, time.Second, 10*time.Millisecond)
 	pending, err := store.LoadPendingResults()
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
@@ -998,6 +1157,7 @@ func TestHandleRestoreInvokesRunnerAndSendsSuccessTaskResult(t *testing.T) {
 
 	handler.Handle(*msg)
 
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
 	assert.Equal(t, executor.ExecutorConfig{
 		ConfigDir:  configDir,
 		RepoPath:   "repo/agent-1",
@@ -1058,6 +1218,7 @@ func TestHandleRestoreRunnerFailureSendsFailedTaskResult(t *testing.T) {
 
 	handler.Handle(*msg)
 
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
 	messages := sent.snapshot()
 	require.Len(t, messages, 2)
 	assert.Equal(t, protocol.TypeRestoreProgress, messages[0].Type)
@@ -1076,6 +1237,48 @@ func TestHandleRestoreRunnerFailureSendsFailedTaskResult(t *testing.T) {
 	assert.Equal(t, "failed", result.Status)
 	assert.Equal(t, "snap-1", result.SnapshotID)
 	assert.Contains(t, result.ErrorLog, "restore failed")
+}
+
+func TestHandleRestoreStartsAsyncAndDoesNotBlockHandle(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{RepoPath: "repo/agent-1"},
+	}))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRunner := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	defer releaseRunner()
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		SendFunc:    sent.send,
+		RestoreRunner: func(context.Context, executor.ExecutorConfig, string, string, []string) error {
+			close(started)
+			<-release
+			return nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
+		SnapshotID: "snap-1",
+		Target:     "/restore/target",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("restore runner did not start")
+	}
+	assert.NotContains(t, messageTypes(sent.snapshot()), protocol.TypeTaskResult)
+
+	releaseRunner()
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
 }
 
 func TestHandleRestoreMissingPolicySendsFailedTaskResult(t *testing.T) {
@@ -1138,16 +1341,14 @@ func TestHandleSnapshotListInvokesRunnerAndSendsResponseWithSameID(t *testing.T)
 
 	handler.Handle(*msg)
 
+	respMsg := waitForMessageType(t, sent, protocol.TypeSnapshotListResp, time.Second)
 	assert.Equal(t, executor.ExecutorConfig{
 		ConfigDir:  configDir,
 		RepoPath:   "repo/agent-1",
 		RcloneArgs: map[string]string{"transfers": "2", "tpslimit": "4"},
 	}, runnerConfig)
-	messages := sent.snapshot()
-	require.Len(t, messages, 1)
-	assert.Equal(t, protocol.TypeSnapshotListResp, messages[0].Type)
-	assert.Equal(t, msg.ID, messages[0].ID)
-	payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&messages[0])
+	assert.Equal(t, msg.ID, respMsg.ID)
+	payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&respMsg)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-1", payload.AgentID)
 	assert.Empty(t, payload.Error)
@@ -1156,6 +1357,45 @@ func TestHandleSnapshotListInvokesRunnerAndSendsResponseWithSameID(t *testing.T)
 	assert.True(t, payload.Snapshots[0].Time.Equal(snapshotTime))
 	assert.Equal(t, []string{"/etc"}, payload.Snapshots[0].Paths)
 	assert.Equal(t, int64(512), payload.Snapshots[0].Size)
+}
+
+func TestHandleSnapshotListStartsAsyncAndDoesNotBlockHandle(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{RepoPath: "repo/agent-1"},
+	}))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRunner := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	defer releaseRunner()
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		SendFunc:    sent.send,
+		SnapshotListRunner: func(context.Context, executor.ExecutorConfig) ([]executor.SnapshotInfo, error) {
+			close(started)
+			<-release
+			return []executor.SnapshotInfo{{ID: "snap-1"}}, nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotListReq, protocol.SnapshotListReqPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot list runner did not start")
+	}
+	assert.Empty(t, sent.snapshot())
+
+	releaseRunner()
+	waitForMessageType(t, sent, protocol.TypeSnapshotListResp, time.Second)
 }
 
 func TestHandleSnapshotListMissingPolicySendsErrorPayload(t *testing.T) {
@@ -1220,6 +1460,7 @@ func TestHandleSnapshotBrowseInvokesRunnerAndSendsResponseWithSameID(t *testing.
 
 	handler.Handle(*msg)
 
+	respMsg := waitForMessageType(t, sent, protocol.TypeSnapshotBrowseResp, time.Second)
 	assert.Equal(t, executor.ExecutorConfig{
 		ConfigDir:  configDir,
 		RepoPath:   "repo/agent-1",
@@ -1229,11 +1470,8 @@ func TestHandleSnapshotBrowseInvokesRunnerAndSendsResponseWithSameID(t *testing.
 		RcloneArgs: map[string]string{"transfers": "2", "tpslimit": "4"},
 	}, runnerConfig)
 	assert.Equal(t, "snap-1", runnerSnapshotID)
-	messages := sent.snapshot()
-	require.Len(t, messages, 1)
-	assert.Equal(t, protocol.TypeSnapshotBrowseResp, messages[0].Type)
-	assert.Equal(t, msg.ID, messages[0].ID)
-	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&messages[0])
+	assert.Equal(t, msg.ID, respMsg.ID)
+	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&respMsg)
 	require.NoError(t, err)
 	assert.Equal(t, "snap-1", payload.SnapshotID)
 	assert.Empty(t, payload.Error)
@@ -1264,15 +1502,52 @@ func TestHandleSnapshotBrowseRunnerFailureSendsErrorPayload(t *testing.T) {
 
 	handler.Handle(*msg)
 
-	messages := sent.snapshot()
-	require.Len(t, messages, 1)
-	assert.Equal(t, protocol.TypeSnapshotBrowseResp, messages[0].Type)
-	assert.Equal(t, msg.ID, messages[0].ID)
-	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&messages[0])
+	respMsg := waitForMessageType(t, sent, protocol.TypeSnapshotBrowseResp, time.Second)
+	assert.Equal(t, msg.ID, respMsg.ID)
+	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&respMsg)
 	require.NoError(t, err)
 	assert.Equal(t, "snap-1", payload.SnapshotID)
 	assert.Equal(t, "browse failed", payload.Error)
 	assert.Nil(t, payload.Entries)
+}
+
+func TestHandleSnapshotBrowseStartsAsyncAndDoesNotBlockHandle(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{RepoPath: "repo/agent-1"},
+	}))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRunner := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	defer releaseRunner()
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		SendFunc:    sent.send,
+		SnapshotBrowseRunner: func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error) {
+			close(started)
+			<-release
+			return []executor.SnapshotFileEntry{{Path: "/srv", Type: "dir"}}, nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotBrowseReq, protocol.SnapshotBrowseReqPayload{SnapshotID: "snap-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot browse runner did not start")
+	}
+	assert.Empty(t, sent.snapshot())
+
+	releaseRunner()
+	waitForMessageType(t, sent, protocol.TypeSnapshotBrowseResp, time.Second)
 }
 
 func TestHandleSnapshotBrowseResponseTooLargeSendsErrorPayload(t *testing.T) {
@@ -1299,13 +1574,12 @@ func TestHandleSnapshotBrowseResponseTooLargeSendsErrorPayload(t *testing.T) {
 
 	handler.Handle(*msg)
 
-	messages := sent.snapshot()
-	require.Len(t, messages, 1)
-	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&messages[0])
+	respMsg := waitForMessageType(t, sent, protocol.TypeSnapshotBrowseResp, time.Second)
+	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&respMsg)
 	require.NoError(t, err)
 	assert.Contains(t, payload.Error, "snapshot browse response too large")
 	assert.Nil(t, payload.Entries)
-	assert.Less(t, len(messages[0].Payload), maxSnapshotBrowseResponseBytes)
+	assert.Less(t, len(respMsg.Payload), maxSnapshotBrowseResponseBytes)
 }
 
 func TestHandlerDirBrowseReqSendsResponseWithSameID(t *testing.T) {
@@ -1538,6 +1812,52 @@ func (s *sentMessages) snapshot() []protocol.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]protocol.Message(nil), s.messages...)
+}
+
+func waitForMessageType(t *testing.T, sent *sentMessages, msgType string, timeout time.Duration) protocol.Message {
+	t.Helper()
+	return waitForMessageTypeCount(t, sent, msgType, 1, timeout)
+}
+
+func waitForMessageTypeCount(t *testing.T, sent *sentMessages, msgType string, count int, timeout time.Duration) protocol.Message {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		msgs := sent.snapshot()
+		seen := 0
+		for _, msg := range msgs {
+			if msg.Type != msgType {
+				continue
+			}
+			seen++
+			if seen == count {
+				return msg
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for message type %s count %d, got %d messages: %v", msgType, count, len(msgs), messageTypes(msgs))
+			return protocol.Message{}
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func messageTypes(msgs []protocol.Message) []string {
+	types := make([]string, len(msgs))
+	for i, msg := range msgs {
+		types[i] = msg.Type
+	}
+	return types
+}
+
+func assertNotClosed(t *testing.T, ch <-chan struct{}, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-ch:
+		t.Fatal("channel closed unexpectedly")
+	case <-time.After(timeout):
+	}
 }
 
 func assertFileMode(t *testing.T, path string, want os.FileMode) {

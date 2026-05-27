@@ -11,11 +11,11 @@ export interface BackupProgress {
 }
 
 export interface TaskHistory {
-  id: number;
+  id: string;
   message_id: string;
   agent_id: string;
   type: "backup" | "restore";
-  status: "pending" | "running" | "success" | "failed" | "timeout";
+  status: "pending" | "running" | "success" | "failed" | "timeout" | "cancelled";
   snapshot_id?: string;
   command_id?: string;
   policy_id?: string;

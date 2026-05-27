@@ -98,7 +98,7 @@ const RCLONE_ARG_FIELDS = [
   },
 ] as const;
 
-function defaultPolicyInput(): PolicyInput {
+export function defaultPolicyInput(): PolicyInput {
   return {
     agent_id: "",
     storage_id: "",
@@ -114,6 +114,7 @@ function defaultPolicyInput(): PolicyInput {
       keep_monthly: 6,
     },
     rclone_args: {},
+    timeout_hours: 6,
   };
 }
 
@@ -243,6 +244,7 @@ export function PoliciesPage() {
       schedule: policy.schedule,
       retention: policy.retention,
       rclone_args: policy.rclone_args || {},
+      timeout_hours: policy.timeout_hours || 6,
     });
     setRetentionPreset(detectRetentionPreset(policy.retention));
     setAdvancedTransferOpen(!!cleanRcloneArgs(policy.rclone_args));
@@ -264,6 +266,7 @@ export function PoliciesPage() {
       ...formData,
       repo_path: "vaultfleet/" + formData.repo_path,
       rclone_args: submitRcloneArgs(formData.rclone_args, !!editingId),
+      timeout_hours: formData.timeout_hours || 6,
     };
     if (editingId) {
       updateMutation.mutate(submitData);
@@ -293,7 +296,7 @@ export function PoliciesPage() {
               </SheetDescription>
             </SheetHeader>
 
-              <form onSubmit={handleSubmit} className="space-y-6 py-6 pb-20">
+              <form aria-label="备份策略表单" onSubmit={handleSubmit} className="space-y-6 py-6 pb-20">
                 <ErrorPanel error={(createMutation.error || updateMutation.error) as any} />
                 
                 <div className="grid grid-cols-2 gap-4">
@@ -375,8 +378,9 @@ export function PoliciesPage() {
                 )}
 
                 <div className="space-y-4">
-                  <Label>备份目录</Label>
+                  <Label htmlFor="backup_dirs">备份目录</Label>
                   <Textarea
+                    id="backup_dirs"
                     value={formData.backup_dirs.join("\n")}
                     onChange={(e) => setFormData({ ...formData, backup_dirs: e.target.value.split("\n").filter(Boolean) })}
                     placeholder="每行一个路径，如: /etc"
@@ -419,6 +423,23 @@ export function PoliciesPage() {
                     {describeCron(formData.schedule)}
                     {" — "}标准 Cron 表达式（分 时 日 月 周）。
                   </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="timeout_hours">任务超时（小时）</Label>
+                  <Input
+                    id="timeout_hours"
+                    type="number"
+                    min={1}
+                    max={72}
+                    value={formData.timeout_hours ?? ""}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setFormData({ ...formData, timeout_hours: value === "" ? undefined : parseInt(value, 10) || 6 });
+                    }}
+                    className="h-9"
+                  />
+                  <p className="text-xs text-muted-foreground">备份任务超过此时间未完成将自动标记为超时，默认 6 小时</p>
                 </div>
 
                 <div className="space-y-4 border-t pt-4">

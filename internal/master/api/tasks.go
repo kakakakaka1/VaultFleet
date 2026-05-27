@@ -58,6 +58,7 @@ func NewTaskHandler(database *db.Database, hub CommandHub) *TaskHandler {
 
 func RegisterTaskRoutes(rg *gin.RouterGroup, h *TaskHandler) {
 	rg.GET("/tasks", h.List)
+	rg.POST("/tasks/:id/cancel", h.CancelTask)
 	rg.POST("/agents/:id/backup-now", h.BackupNow)
 }
 
@@ -73,12 +74,25 @@ func (h *TaskHandler) BackupNow(c *gin.Context) {
 		return
 	}
 	commandService := h.commandService()
+
+	var timeoutHours int
+	var policyID, storageID string
+	var policy db.BackupPolicy
+	if err := h.DB.DB.Where("agent_id = ?", agentID).First(&policy).Error; err == nil {
+		timeoutHours = normalizedPolicyTimeoutHours(policy.TimeoutHours)
+		policyID = policy.ID
+		storageID = policy.StorageID
+	}
+
 	command, err := commandService.CreateCommand(contextFromGin(c), commands.CreateCommandInput{
-		AgentID:   agentID,
-		Type:      protocol.TypeBackupNow,
-		Message:   *msg,
-		TaskType:  "backup",
-		TaskState: commands.TaskStatusPending,
+		AgentID:      agentID,
+		Type:         protocol.TypeBackupNow,
+		Message:      *msg,
+		TaskType:     "backup",
+		TaskState:    commands.TaskStatusPending,
+		PolicyID:     policyID,
+		StorageID:    storageID,
+		TimeoutHours: timeoutHours,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
@@ -96,6 +110,58 @@ func (h *TaskHandler) BackupNow(c *gin.Context) {
 		"command_id": command.ID,
 		"message_id": msg.ID,
 	})
+}
+
+func (h *TaskHandler) CancelTask(c *gin.Context) {
+	taskID := c.Param("id")
+
+	var history db.TaskHistory
+	if err := h.DB.DB.First(&history, "id = ?", taskID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "task not found"})
+		return
+	}
+
+	if history.Status != commands.TaskStatusRunning && history.Status != commands.TaskStatusPending {
+		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "task is not running or pending"})
+		return
+	}
+
+	if history.CommandID == "" {
+		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "task has no associated command"})
+		return
+	}
+
+	commandService := h.commandService()
+	result, err := commandService.CancelCommand(contextFromGin(c), history.CommandID)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+
+	if result.NeedsWS {
+		if h.Hub == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "agent websocket unavailable"})
+			return
+		}
+		if !h.Hub.IsOnline(result.AgentID) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "agent is offline"})
+			return
+		}
+		cancelMsg, err := protocol.NewMessage(protocol.TypeCancelTask, protocol.CancelTaskPayload{
+			AgentID:   result.AgentID,
+			MessageID: result.MessageID,
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "encode cancel command"})
+			return
+		}
+		if err := h.Hub.Send(result.AgentID, *cancelMsg); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "send cancel command failed"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "message": "cancel requested"})
 }
 
 func (h *TaskHandler) commandService() *commands.Service {

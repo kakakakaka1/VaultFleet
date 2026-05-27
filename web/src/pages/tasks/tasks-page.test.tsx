@@ -1,7 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import type { TaskHistory } from "@/types/task";
-import { formatBytes, formatSpeed, renderTaskMetricContent } from "./tasks-page";
+import { formatBytes, formatDuration, formatSpeed, renderTaskMetricContent } from "./tasks-page";
 
 afterEach(() => {
   cleanup();
@@ -21,6 +22,13 @@ describe("task progress helpers", () => {
     expect(formatSpeed(512)).toBe("512 B/s");
     expect(formatSpeed(512 * 1024)).toBe("512.0 KB/s");
     expect(formatSpeed(2 * 1024 * 1024)).toBe("2.0 MB/s");
+  });
+
+  it("formats task durations as mm:ss or h:mm:ss", () => {
+    expect(formatDuration(0)).toBe("0s");
+    expect(formatDuration(59_999)).toBe("59s");
+    expect(formatDuration(60_000)).toBe("1:00");
+    expect(formatDuration(3_661_000)).toBe("1:01:01");
   });
 
   it("renders active backup progress with percent and upload speed", () => {
@@ -102,17 +110,34 @@ describe("task progress helpers", () => {
     expect(screen.getByText("清理旧快照...")).toBeInTheDocument();
 
     rerender(<>{renderTaskMetricContent(task({ status: "success", duration_ms: 1530, repo_size: 5 * 1024 * 1024 }))}</>);
-    expect(screen.getByText("1.5s")).toBeInTheDocument();
+    expect(screen.getByText("1s")).toBeInTheDocument();
     expect(screen.getByText("5.00 MB")).toBeInTheDocument();
 
     rerender(<>{renderTaskMetricContent(task({ status: "success", duration_ms: 1530, repo_size: 4096 }))}</>);
     expect(screen.getByText("0.00 MB")).toBeInTheDocument();
   });
+
+  it("renders a cancel button for active tasks when a cancel callback is provided", async () => {
+    const user = userEvent.setup();
+    let cancelledTaskId: string | null = null;
+
+    render(<>{renderTaskMetricContent(task({ id: "task-42", status: "running" }), (taskId) => { cancelledTaskId = taskId; })}</>);
+
+    await user.click(screen.getByRole("button", { name: "取消任务" }));
+
+    expect(cancelledTaskId).toBe("task-42");
+  });
+
+  it("renders cancelled tasks with formatted duration", () => {
+    render(<>{renderTaskMetricContent(task({ status: "cancelled", duration_ms: 65_000 }))}</>);
+
+    expect(screen.getByText("1:05")).toBeInTheDocument();
+  });
 });
 
 function task(overrides: Partial<TaskHistory> = {}): TaskHistory {
   return {
-    id: 1,
+    id: "task-1",
     message_id: "msg-1",
     agent_id: "agent-1",
     type: "backup",

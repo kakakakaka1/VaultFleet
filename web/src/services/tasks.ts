@@ -1,7 +1,9 @@
 import { TaskFilters, TaskHistory } from "@/types/task";
-import { apiGet } from "./http";
+import { apiGet, apiPost } from "./http";
 
 export const listTasks = (filters: TaskFilters = {}) => apiGet<TaskHistory[]>(`/api/tasks${toQuery(filters)}`);
+
+export const cancelTask = (taskId: string) => apiPost(`/api/tasks/${taskId}/cancel`, {});
 
 function toQuery(filters: TaskFilters): string {
   const params = new URLSearchParams();

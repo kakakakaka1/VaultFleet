@@ -78,8 +78,8 @@ type Handler struct {
 	dirSizeFunc              DirSizeFunc
 	agentVersion             string
 	updater                  AgentUpdater
-	backupMu                 sync.Mutex
-	backupRunning            bool
+	tasks                    *taskManager
+	pendingResultsMu         sync.Mutex
 }
 
 func NewHandler(config HandlerConfig) *Handler {
@@ -145,6 +145,7 @@ func NewHandler(config HandlerConfig) *Handler {
 		dirSizeFunc:              dirSizeFunc,
 		agentVersion:             config.AgentVersion,
 		updater:                  config.Updater,
+		tasks:                    newTaskManager(),
 	}
 }
 
@@ -168,6 +169,8 @@ func (h *Handler) Handle(msg protocol.Message) {
 		h.handleCollectLogsReq(msg)
 	case protocol.TypeVersionInfo:
 		h.handleVersionInfo(msg)
+	case protocol.TypeCancelTask:
+		h.handleCancelTask(msg)
 	case protocol.TypeUpdateAgent:
 		h.handleUpdateAgent(msg)
 	}
@@ -228,7 +231,12 @@ func (h *Handler) handlePolicyPush(msg protocol.Message) {
 		if pushedPolicy.Schedule == "" {
 			h.scheduler.RemoveJob(pushedPolicy.AgentID)
 		} else if err := h.scheduler.UpdateSchedule(pushedPolicy.AgentID, pushedPolicy.Schedule, func() {
-			h.runBackupForPolicy("", pushedPolicy.AgentID, pushedPolicy)
+			startErr := h.tasks.Start("", taskTypeBackup, func(ctx context.Context) {
+				h.runBackupForPolicy(ctx, "", pushedPolicy.AgentID, pushedPolicy)
+			})
+			if startErr != nil {
+				log.Printf("scheduled backup skipped: %v", startErr)
+			}
 		}); err != nil {
 			log.Printf("update backup schedule failed: %v", err)
 			rollbackState.restore()
@@ -509,24 +517,30 @@ func (h *Handler) handleBackupNow(msg protocol.Message) {
 	if agentID == "" {
 		agentID = policyPayload.AgentID
 	}
-	h.runBackupForPolicy(msg.ID, agentID, policyPayload)
+	startErr := h.tasks.Start(msg.ID, taskTypeBackup, func(ctx context.Context) {
+		h.runBackupForPolicy(ctx, msg.ID, agentID, policyPayload)
+	})
+	if startErr != nil {
+		h.sendTaskResultWithID(msg.ID, h.failedTaskResult(agentID, startErr.Error(), time.Now()))
+	}
 }
 
-func (h *Handler) runBackupForPolicy(messageID string, agentID string, policyPayload *protocol.PolicyPushPayload) {
+func (h *Handler) runBackupForPolicy(ctx context.Context, messageID string, agentID string, policyPayload *protocol.PolicyPushPayload) {
 	if policyPayload == nil {
 		return
 	}
 	if agentID == "" {
 		agentID = policyPayload.AgentID
 	}
-	if !h.beginBackup() {
-		h.sendTaskResultWithID(messageID, h.failedTaskResult(agentID, "backup already running", time.Now()))
-		return
-	}
-	defer h.endBackup()
 
 	startedAt := time.Now()
-	result := h.backupRunnerWithProgress(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), h.backupProgressCallback(messageID, agentID))
+	result := h.backupRunnerWithProgress(ctx, executorConfigForPolicy(h.configDir, policyPayload), h.backupProgressCallback(messageID, agentID))
+	if ctx.Err() == context.Canceled {
+		result.Status = "cancelled"
+		if result.ErrorLog == "" {
+			result.ErrorLog = ctx.Err().Error()
+		}
+	}
 	h.sendTaskResultWithID(messageID, result.ToProtocol(agentID, startedAt))
 }
 
@@ -593,22 +607,6 @@ func (h *Handler) sendBackupProgress(messageID string, payload protocol.BackupPr
 	}
 }
 
-func (h *Handler) beginBackup() bool {
-	h.backupMu.Lock()
-	defer h.backupMu.Unlock()
-	if h.backupRunning {
-		return false
-	}
-	h.backupRunning = true
-	return true
-}
-
-func (h *Handler) endBackup() {
-	h.backupMu.Lock()
-	defer h.backupMu.Unlock()
-	h.backupRunning = false
-}
-
 func (h *Handler) sendPolicyAck(messageID string, agentID string, success bool, errorText string) {
 	payload := protocol.PolicyAckPayload{
 		AgentID: agentID,
@@ -647,6 +645,9 @@ func (h *Handler) FlushPendingResults() {
 	if h.policyStore == nil {
 		return
 	}
+	h.pendingResultsMu.Lock()
+	defer h.pendingResultsMu.Unlock()
+
 	results, err := h.policyStore.LoadPendingResults()
 	if err != nil {
 		log.Printf("load pending results failed: %v", err)
@@ -695,6 +696,9 @@ func (h *Handler) persistPendingResult(messageID string, result protocol.TaskRes
 	if h.policyStore == nil {
 		return
 	}
+	h.pendingResultsMu.Lock()
+	defer h.pendingResultsMu.Unlock()
+
 	results, err := h.policyStore.LoadPendingResults()
 	if err != nil {
 		log.Printf("load pending results failed: %v", err)
@@ -794,24 +798,23 @@ func runSnapshotBrowse(ctx context.Context, cfg executor.ExecutorConfig, snapsho
 
 func (h *Handler) handleRestoreReq(msg protocol.Message) {
 	req, err := protocol.ParsePayload[protocol.RestoreReqPayload](&msg)
-	startedAt := time.Now()
 	if err != nil {
 		log.Printf("parse restore request failed: %v", err)
-		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", "", "parse restore: "+err.Error(), startedAt))
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", "", "parse restore: "+err.Error(), time.Now()))
 		return
 	}
 	if h.policyStore == nil {
-		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", req.SnapshotID, "policy store not configured", startedAt))
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", req.SnapshotID, "policy store not configured", time.Now()))
 		return
 	}
 
 	policyPayload, err := h.policyStore.LoadPolicy()
 	if err != nil {
 		if os.IsNotExist(err) {
-			h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", req.SnapshotID, "no backup policy configured for this agent", startedAt))
+			h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", req.SnapshotID, "no backup policy configured for this agent", time.Now()))
 		} else {
 			log.Printf("load policy failed: %v", err)
-			h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", req.SnapshotID, "load policy: "+err.Error(), startedAt))
+			h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "restore", req.SnapshotID, "load policy: "+err.Error(), time.Now()))
 		}
 		return
 	}
@@ -820,23 +823,35 @@ func (h *Handler) handleRestoreReq(msg protocol.Message) {
 		agentID = h.agentID
 	}
 
-	h.sendRestoreProgress(msg.ID, agentID, req.SnapshotID)
-	err = h.restoreRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID, req.Target, req.IncludePaths)
-	finishedAt := time.Now()
-	result := protocol.TaskResultPayload{
-		AgentID:    agentID,
-		TaskType:   "restore",
-		Status:     "success",
-		SnapshotID: req.SnapshotID,
-		DurationMs: finishedAt.Sub(startedAt).Milliseconds(),
-		StartedAt:  startedAt,
-		FinishedAt: finishedAt,
+	startErr := h.tasks.Start(msg.ID, taskTypeRestore, func(ctx context.Context) {
+		startedAt := time.Now()
+		h.sendRestoreProgress(msg.ID, agentID, req.SnapshotID)
+		err := h.restoreRunner(ctx, executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID, req.Target, req.IncludePaths)
+		finishedAt := time.Now()
+		result := protocol.TaskResultPayload{
+			AgentID:    agentID,
+			TaskType:   "restore",
+			Status:     "success",
+			SnapshotID: req.SnapshotID,
+			DurationMs: finishedAt.Sub(startedAt).Milliseconds(),
+			StartedAt:  startedAt,
+			FinishedAt: finishedAt,
+		}
+		if err != nil {
+			result.Status = "failed"
+			result.ErrorLog = err.Error()
+		}
+		if ctx.Err() == context.Canceled {
+			result.Status = "cancelled"
+			if result.ErrorLog == "" {
+				result.ErrorLog = ctx.Err().Error()
+			}
+		}
+		h.sendTaskResultWithID(msg.ID, result)
+	})
+	if startErr != nil {
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "restore", req.SnapshotID, startErr.Error(), time.Now()))
 	}
-	if err != nil {
-		result.Status = "failed"
-		result.ErrorLog = err.Error()
-	}
-	h.sendTaskResultWithID(msg.ID, result)
 }
 
 func (h *Handler) sendRestoreProgress(messageID string, agentID string, snapshotID string) {
@@ -886,12 +901,15 @@ func (h *Handler) handleSnapshotListReq(msg protocol.Message) {
 		agentID = policyPayload.AgentID
 	}
 
-	snapshots, err := h.snapshotListRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload))
-	if err != nil {
-		h.sendSnapshotListResp(msg.ID, agentID, nil, err.Error())
-		return
-	}
-	h.sendSnapshotListResp(msg.ID, agentID, snapshotsToProtocol(snapshots), "")
+	finalAgentID := agentID
+	_ = h.tasks.Start(msg.ID, taskTypeQuery, func(ctx context.Context) {
+		snapshots, err := h.snapshotListRunner(ctx, executorConfigForPolicy(h.configDir, policyPayload))
+		if err != nil {
+			h.sendSnapshotListResp(msg.ID, finalAgentID, nil, err.Error())
+			return
+		}
+		h.sendSnapshotListResp(msg.ID, finalAgentID, snapshotsToProtocol(snapshots), "")
+	})
 }
 
 func (h *Handler) sendSnapshotListResp(messageID string, agentID string, snapshots []protocol.SnapshotInfo, errorText string) {
@@ -934,26 +952,30 @@ func (h *Handler) handleSnapshotBrowseReq(msg protocol.Message) {
 		return
 	}
 
-	entries, err := h.snapshotBrowseRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID, req.Path)
-	if err != nil {
-		h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, nil, err.Error())
-		return
-	}
-
-	if req.Path != "" {
-		entries = filterDirectChildren(entries, req.Path)
-	}
-
-	protoEntries := make([]protocol.SnapshotFileEntry, len(entries))
-	for i, entry := range entries {
-		protoEntries[i] = protocol.SnapshotFileEntry{
-			Path:  entry.Path,
-			Type:  entry.Type,
-			Size:  entry.Size,
-			Mtime: entry.Mtime,
+	snapshotID := req.SnapshotID
+	path := req.Path
+	_ = h.tasks.Start(msg.ID, taskTypeQuery, func(ctx context.Context) {
+		entries, err := h.snapshotBrowseRunner(ctx, executorConfigForPolicy(h.configDir, policyPayload), snapshotID, path)
+		if err != nil {
+			h.sendSnapshotBrowseResp(msg.ID, snapshotID, nil, err.Error())
+			return
 		}
-	}
-	h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, protoEntries, "")
+
+		if path != "" {
+			entries = filterDirectChildren(entries, path)
+		}
+
+		protoEntries := make([]protocol.SnapshotFileEntry, len(entries))
+		for i, entry := range entries {
+			protoEntries[i] = protocol.SnapshotFileEntry{
+				Path:  entry.Path,
+				Type:  entry.Type,
+				Size:  entry.Size,
+				Mtime: entry.Mtime,
+			}
+		}
+		h.sendSnapshotBrowseResp(msg.ID, snapshotID, protoEntries, "")
+	})
 }
 
 func (h *Handler) sendSnapshotBrowseResp(messageID string, snapshotID string, entries []protocol.SnapshotFileEntry, errorText string) {
@@ -980,6 +1002,25 @@ func (h *Handler) sendSnapshotBrowseResp(messageID string, snapshotID string, en
 	msg.ID = messageID
 	if err := h.sendMessage(*msg); err != nil {
 		log.Printf("send snapshot browse response failed: %v", err)
+	}
+}
+
+func (h *Handler) handleCancelTask(msg protocol.Message) {
+	payload, err := protocol.ParsePayload[protocol.CancelTaskPayload](&msg)
+	if err != nil {
+		log.Printf("parse cancel_task failed: %v", err)
+		return
+	}
+	if payload.MessageID == "" {
+		log.Printf("ignore cancel_task with empty message_id")
+		return
+	}
+	if payload.AgentID != "" && h.agentID != "" && payload.AgentID != h.agentID {
+		log.Printf("ignore cancel_task for agent %s on agent %s", payload.AgentID, h.agentID)
+		return
+	}
+	if h.tasks.Cancel(payload.MessageID) {
+		log.Printf("cancelled task %s", payload.MessageID)
 	}
 }
 

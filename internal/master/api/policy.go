@@ -21,6 +21,12 @@ type PolicyHandler struct {
 	MasterKey []byte
 }
 
+const (
+	defaultPolicyTimeoutHours = 6
+	minPolicyTimeoutHours     = 1
+	maxPolicyTimeoutHours     = 72
+)
+
 func NewPolicyHandler(database *db.Database, eventBus *events.Bus) *PolicyHandler {
 	return &PolicyHandler{
 		DB:        database,
@@ -39,6 +45,7 @@ type createPolicyRequest struct {
 	Schedule        string            `json:"schedule" binding:"required"`
 	Retention       map[string]any    `json:"retention" binding:"required"`
 	RcloneArgs      map[string]string `json:"rclone_args"`
+	TimeoutHours    *int              `json:"timeout_hours"`
 }
 
 type updatePolicyRequest struct {
@@ -48,6 +55,7 @@ type updatePolicyRequest struct {
 	Schedule        string            `json:"schedule"`
 	Retention       map[string]any    `json:"retention"`
 	RcloneArgs      map[string]string `json:"rclone_args"`
+	TimeoutHours    *int              `json:"timeout_hours"`
 }
 
 type policyResponse struct {
@@ -60,6 +68,7 @@ type policyResponse struct {
 	Schedule        string            `json:"schedule"`
 	Retention       map[string]any    `json:"retention"`
 	RcloneArgs      map[string]string `json:"rclone_args"`
+	TimeoutHours    int               `json:"timeout_hours"`
 	Synced          bool              `json:"synced"`
 	CreatedAt       time.Time         `json:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at"`
@@ -118,6 +127,10 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 			return
 		}
 	}
+	timeoutHours, ok := validatePolicyTimeoutHours(c, request.TimeoutHours)
+	if !ok {
+		return
+	}
 
 	policy := db.BackupPolicy{
 		AgentID:         request.AgentID,
@@ -129,6 +142,7 @@ func (h *PolicyHandler) CreatePolicy(c *gin.Context) {
 		Schedule:        request.Schedule,
 		Retention:       retention,
 		RcloneArgs:      rcloneArgs,
+		TimeoutHours:    timeoutHours,
 		Synced:          false,
 	}
 
@@ -227,6 +241,13 @@ func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 			return
 		}
 		policy.RcloneArgs = rcloneArgs
+	}
+	if request.TimeoutHours != nil {
+		timeoutHours, ok := validatePolicyTimeoutHours(c, request.TimeoutHours)
+		if !ok {
+			return
+		}
+		policy.TimeoutHours = timeoutHours
 	}
 
 	policy.Synced = false
@@ -355,10 +376,29 @@ func newPolicyResponse(policy db.BackupPolicy) (policyResponse, error) {
 		Schedule:        policy.Schedule,
 		Retention:       retention,
 		RcloneArgs:      rcloneArgs,
+		TimeoutHours:    normalizedPolicyTimeoutHours(policy.TimeoutHours),
 		Synced:          policy.Synced,
 		CreatedAt:       policy.CreatedAt,
 		UpdatedAt:       policy.UpdatedAt,
 	}, nil
+}
+
+func validatePolicyTimeoutHours(c *gin.Context, timeoutHours *int) (int, bool) {
+	if timeoutHours == nil {
+		return defaultPolicyTimeoutHours, true
+	}
+	if *timeoutHours < minPolicyTimeoutHours || *timeoutHours > maxPolicyTimeoutHours {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "timeout_hours must be between 1 and 72"})
+		return 0, false
+	}
+	return *timeoutHours, true
+}
+
+func normalizedPolicyTimeoutHours(timeoutHours int) int {
+	if timeoutHours < minPolicyTimeoutHours || timeoutHours > maxPolicyTimeoutHours {
+		return defaultPolicyTimeoutHours
+	}
+	return timeoutHours
 }
 
 func unmarshalPolicyRcloneArgs(raw string) (map[string]string, error) {

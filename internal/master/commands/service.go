@@ -21,12 +21,14 @@ const (
 	CommandStatusSucceeded  = "succeeded"
 	CommandStatusFailed     = "failed"
 	CommandStatusTimeout    = "timeout"
+	CommandStatusCancelled  = "cancelled"
 
-	TaskStatusPending = "pending"
-	TaskStatusRunning = "running"
-	TaskStatusSuccess = "success"
-	TaskStatusFailed  = "failed"
-	TaskStatusTimeout = "timeout"
+	TaskStatusPending   = "pending"
+	TaskStatusRunning   = "running"
+	TaskStatusSuccess   = "success"
+	TaskStatusFailed    = "failed"
+	TaskStatusTimeout   = "timeout"
+	TaskStatusCancelled = "cancelled"
 )
 
 type Hub interface {
@@ -54,6 +56,7 @@ type CreateCommandInput struct {
 	PolicyID        string
 	PolicyUpdatedAt *time.Time
 	StorageID       string
+	TimeoutHours    int
 }
 
 func NewService(database *db.Database, hub Hub) *Service {
@@ -90,7 +93,11 @@ func (s *Service) CreateCommand(ctx context.Context, input CreateCommandInput) (
 		return db.AgentCommand{}, fmt.Errorf("encrypt command payload: %w", err)
 	}
 
-	deadline := DeadlineForType(input.Type, s.now())
+	now := s.now()
+	deadline := DeadlineForType(input.Type, now)
+	if input.TimeoutHours > 0 {
+		deadline = now.Add(time.Duration(input.TimeoutHours) * time.Hour)
+	}
 	command := db.AgentCommand{
 		AgentID:         input.AgentID,
 		Type:            input.Type,
@@ -251,8 +258,11 @@ func (s *Service) CompleteTaskResultWith(ctx context.Context, agentID string, me
 	}
 	now := s.now()
 	commandStatus := CommandStatusFailed
-	if result.Status == TaskStatusSuccess {
+	switch result.Status {
+	case TaskStatusSuccess:
 		commandStatus = CommandStatusSucceeded
+	case TaskStatusCancelled:
+		commandStatus = CommandStatusCancelled
 	}
 
 	errorMessage := result.ErrorLog
@@ -417,6 +427,64 @@ func (s *Service) TimeoutCommand(ctx context.Context, agentID string, messageID 
 	return s.completeCommand(ctx, agentID, messageID, "", CommandStatusTimeout, nil, "command timeout")
 }
 
+type CancelCommandResult struct {
+	NeedsWS   bool
+	AgentID   string
+	MessageID string
+}
+
+func (s *Service) CancelCommand(ctx context.Context, commandID string) (CancelCommandResult, error) {
+	if s == nil || s.DB == nil || s.DB.DB == nil {
+		return CancelCommandResult{}, errors.New("command service database not configured")
+	}
+
+	var command db.AgentCommand
+	if err := s.DB.DB.WithContext(ctx).First(&command, "id = ?", commandID).Error; err != nil {
+		return CancelCommandResult{}, err
+	}
+	if isTerminal(command.Status) {
+		return CancelCommandResult{}, errors.New("command already in terminal state")
+	}
+
+	if command.Status != CommandStatusPending {
+		return CancelCommandResult{
+			NeedsWS:   true,
+			AgentID:   command.AgentID,
+			MessageID: command.MessageID,
+		}, nil
+	}
+
+	now := s.now()
+	err := s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&db.AgentCommand{}).
+			Where("id = ? AND status = ?", command.ID, CommandStatusPending).
+			Updates(map[string]any{
+				"status":        CommandStatusCancelled,
+				"error_message": "cancelled by user",
+				"completed_at":  &now,
+				"updated_at":    now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return errCommandNotActive
+		}
+		return tx.Model(&db.TaskHistory{}).
+			Where("command_id = ? AND status IN ?", command.ID, []string{TaskStatusPending, TaskStatusRunning}).
+			Updates(map[string]any{
+				"status":      TaskStatusCancelled,
+				"error_log":   "cancelled by user",
+				"finished_at": &now,
+				"updated_at":  now,
+			}).Error
+	})
+	if errors.Is(err, errCommandNotActive) {
+		return CancelCommandResult{}, errors.New("command is not active")
+	}
+	return CancelCommandResult{NeedsWS: false}, err
+}
+
 func (s *Service) completeCommand(ctx context.Context, agentID string, messageID string, commandType string, status string, result any, errorText string) error {
 	if s == nil || s.DB == nil || s.DB.DB == nil || messageID == "" {
 		return nil
@@ -470,6 +538,9 @@ func (s *Service) TimeoutExpired(ctx context.Context) (int64, error) {
 		if err != nil {
 			return count, err
 		}
+		if updated > 0 {
+			s.sendTimeoutCancel(command)
+		}
 		count += updated
 	}
 	return count, nil
@@ -503,6 +574,27 @@ func (s *Service) timeoutCommandAndTask(ctx context.Context, command db.AgentCom
 			}).Error
 	})
 	return rows, err
+}
+
+func (s *Service) sendTimeoutCancel(command db.AgentCommand) {
+	if s == nil || s.Hub == nil || command.AgentID == "" || command.MessageID == "" {
+		return
+	}
+	if command.Status != CommandStatusDispatched && command.Status != CommandStatusRunning {
+		return
+	}
+	if !isCancelableOnTimeout(command.Type) || !s.Hub.IsOnline(command.AgentID) {
+		return
+	}
+
+	cancelMsg, err := protocol.NewMessage(protocol.TypeCancelTask, protocol.CancelTaskPayload{
+		AgentID:   command.AgentID,
+		MessageID: command.MessageID,
+	})
+	if err != nil {
+		return
+	}
+	_ = s.Hub.Send(command.AgentID, *cancelMsg)
 }
 
 func (s *Service) RunTimeoutScanner(ctx context.Context, interval time.Duration) {
@@ -801,6 +893,15 @@ func isLongRunning(commandType string) bool {
 	return commandType == protocol.TypeBackupNow || commandType == protocol.TypeRestoreReq || commandType == protocol.TypeSelectiveRestoreReq
 }
 
+func isCancelableOnTimeout(commandType string) bool {
+	switch commandType {
+	case protocol.TypeBackupNow, protocol.TypeRestoreReq, protocol.TypeSelectiveRestoreReq, protocol.TypeSnapshotListReq, protocol.TypeSnapshotBrowseReq:
+		return true
+	default:
+		return false
+	}
+}
+
 func taskTypeForCommand(commandType string) (string, bool) {
 	switch commandType {
 	case protocol.TypeBackupNow:
@@ -813,15 +914,15 @@ func taskTypeForCommand(commandType string) (string, bool) {
 }
 
 func isTerminal(status string) bool {
-	return status == CommandStatusSucceeded || status == CommandStatusFailed || status == CommandStatusTimeout
+	return status == CommandStatusSucceeded || status == CommandStatusFailed || status == CommandStatusTimeout || status == CommandStatusCancelled
 }
 
 func terminalStatuses() []string {
-	return []string{CommandStatusSucceeded, CommandStatusFailed, CommandStatusTimeout}
+	return []string{CommandStatusSucceeded, CommandStatusFailed, CommandStatusTimeout, CommandStatusCancelled}
 }
 
 func isTaskTerminal(status string) bool {
-	return status == TaskStatusSuccess || status == TaskStatusFailed || status == TaskStatusTimeout
+	return status == TaskStatusSuccess || status == TaskStatusFailed || status == TaskStatusTimeout || status == TaskStatusCancelled
 }
 
 func nullableTime(value time.Time) *time.Time {

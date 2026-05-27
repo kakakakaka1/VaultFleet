@@ -132,6 +132,37 @@ func TestRestoreSendsMessageAndRecordsRunningTask(t *testing.T) {
 	assert.Nil(t, history.FinishedAt)
 }
 
+func TestRestoreUsesPolicyTimeoutHours(t *testing.T) {
+	setup := setupRestoreAPI(t)
+	agent := createRestoreTestAgent(t, setup.database, "offline")
+	now := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	service := commands.NewService(setup.database, setup.hub)
+	service.Now = func() time.Time { return now }
+	setup.handler.Commands = service
+	policy := db.BackupPolicy{
+		AgentID:      agent.ID,
+		StorageID:    "storage-1",
+		RepoPath:     "repo/agent-1",
+		TimeoutHours: 12,
+	}
+	require.NoError(t, setup.database.DB.Create(&policy).Error)
+
+	w := postAnyJSON(t, setup.router, "/api/agents/"+agent.ID+"/restore", map[string]any{
+		"snapshot_id": "snap-1",
+		"target_path": "/restore/target",
+	})
+
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireMap(t, body["data"])
+	var command db.AgentCommand
+	require.NoError(t, setup.database.DB.First(&command, "id = ?", data["command_id"]).Error)
+	require.NotNil(t, command.DeadlineAt)
+	assert.Equal(t, now.Add(12*time.Hour), *command.DeadlineAt)
+	assert.Equal(t, policy.ID, command.PolicyID)
+	assert.Equal(t, "storage-1", command.StorageID)
+}
+
 func TestRestoreResolvesDatabaseSnapshotIDToResticSnapshotID(t *testing.T) {
 	setup := setupRestoreAPI(t)
 	agent := createRestoreTestAgent(t, setup.database, "online")

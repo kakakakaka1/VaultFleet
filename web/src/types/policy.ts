@@ -12,6 +12,7 @@ export interface BackupPolicy {
   updated_at: string;
   restic_password?: string;
   rclone_args?: Record<string, string>;
+  timeout_hours?: number;
 }
 
 export interface RetentionConfig {
@@ -32,4 +33,5 @@ export interface PolicyInput {
   schedule: string;
   retention: RetentionConfig;
   rclone_args?: Record<string, string>;
+  timeout_hours?: number;
 }

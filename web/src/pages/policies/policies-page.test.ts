@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanRcloneArgs, defaultRcloneArgs, submitRcloneArgs } from "./policies-page";
+import { cleanRcloneArgs, defaultPolicyInput, defaultRcloneArgs, submitRcloneArgs } from "./policies-page";
 
 describe("policy rclone args helpers", () => {
   it("returns WebDAV transfer defaults", () => {
@@ -40,5 +40,9 @@ describe("policy rclone args helpers", () => {
   it("sends an empty object to clear saved args when editing", () => {
     expect(submitRcloneArgs({ transfers: " ", timeout: "" }, true)).toEqual({});
     expect(submitRcloneArgs({ transfers: " ", timeout: "" }, false)).toBeUndefined();
+  });
+
+  it("defaults policy task timeout to 6 hours", () => {
+    expect(defaultPolicyInput().timeout_hours).toBe(6);
   });
 });

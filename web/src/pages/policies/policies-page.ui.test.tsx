@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { listAgents, backupNow } from "@/services/agents";
@@ -43,6 +43,7 @@ beforeAll(() => {
 });
 
 afterEach(() => {
+  cleanup();
   vi.clearAllMocks();
 });
 
@@ -70,6 +71,7 @@ describe("PoliciesPage rclone form state", () => {
       exclude_patterns: [],
       schedule: "0 2 * * *",
       retention: {},
+      timeout_hours: 6,
       synced: false,
       created_at: "2026-05-25T00:00:00Z",
       updated_at: "2026-05-25T00:00:00Z",
@@ -98,6 +100,70 @@ describe("PoliciesPage rclone form state", () => {
     await user.click(screen.getByRole("button", { name: "添加策略" }));
 
     expect(screen.queryByLabelText("并发传输数")).not.toBeInTheDocument();
+  });
+
+  it("submits the configured timeout hours", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listPolicies).mockResolvedValue([]);
+    vi.mocked(listAgents).mockResolvedValue([
+      {
+        id: "agent-1",
+        name: "node-1",
+        status: "online",
+        last_seen: "",
+        version: "",
+        hostname: "",
+        os: "",
+        arch: "",
+        created_at: "2026-05-25T00:00:00Z",
+      },
+    ]);
+    vi.mocked(listStorage).mockResolvedValue([
+      {
+        id: "storage-1",
+        name: "S3 Store",
+        rclone_type: "s3",
+        rclone_config: {},
+        created_at: "2026-05-25T00:00:00Z",
+        updated_at: "2026-05-25T00:00:00Z",
+      },
+    ]);
+    vi.mocked(createPolicy).mockResolvedValue({
+      id: "policy-1",
+      agent_id: "agent-1",
+      storage_id: "storage-1",
+      repo_path: "vaultfleet/node-1",
+      backup_dirs: ["/data"],
+      exclude_patterns: [],
+      schedule: "0 2 * * *",
+      retention: {},
+      timeout_hours: 12,
+      synced: false,
+      created_at: "2026-05-25T00:00:00Z",
+      updated_at: "2026-05-25T00:00:00Z",
+    });
+    vi.mocked(updatePolicy).mockResolvedValue({} as never);
+    vi.mocked(deletePolicy).mockResolvedValue({} as never);
+    vi.mocked(backupNow).mockResolvedValue({ command_id: "cmd-1", message_id: "msg-1" });
+
+    render(
+      <QueryClientProvider client={newTestQueryClient()}>
+        <PoliciesPage />
+      </QueryClientProvider>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "添加策略" }));
+    await user.click(screen.getAllByRole("combobox")[0]);
+    await user.click(await screen.findByRole("option", { name: "node-1" }));
+    await user.click(screen.getAllByRole("combobox")[1]);
+    await user.click(await screen.findByRole("option", { name: "S3 Store" }));
+    await user.type(screen.getByRole("textbox", { name: "备份目录" }), "/data");
+    await user.clear(screen.getByLabelText("任务超时（小时）"));
+    await user.type(screen.getByLabelText("任务超时（小时）"), "12");
+    fireEvent.submit(screen.getByRole("form", { name: "备份策略表单" }));
+
+    await waitFor(() => expect(createPolicy).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createPolicy).mock.calls[0][0]).toEqual(expect.objectContaining({ timeout_hours: 12 }));
   });
 });
 

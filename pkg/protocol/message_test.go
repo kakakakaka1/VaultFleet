@@ -190,6 +190,17 @@ func TestBackupProgressPayloadMarshalsExpectedKeys(t *testing.T) {
 	assert.Contains(t, fields, "current_file")
 }
 
+func TestCancelTaskPayloadMarshal(t *testing.T) {
+	payload := CancelTaskPayload{
+		AgentID:   "agent-1",
+		MessageID: "msg-abc123",
+	}
+
+	msg, parsed := roundTripPayload[CancelTaskPayload](t, TypeCancelTask, payload)
+	assert.Equal(t, TypeCancelTask, msg.Type)
+	assert.Equal(t, payload, *parsed)
+}
+
 func TestTaskResultPayload(t *testing.T) {
 	finishedAt := time.Date(2026, 5, 18, 9, 30, 45, 0, time.UTC)
 	startedAt := finishedAt.Add(-45 * time.Second)
@@ -387,6 +398,7 @@ func TestAllMessageTypeConstants(t *testing.T) {
 		TypeVersionInfo,
 		TypeUpdateAgent,
 		TypeBackupProgress,
+		TypeCancelTask,
 	}
 	expected := []string{
 		"heartbeat",
@@ -410,10 +422,11 @@ func TestAllMessageTypeConstants(t *testing.T) {
 		"version_info",
 		"update_agent",
 		"backup_progress",
+		"cancel_task",
 	}
 
 	assert.Equal(t, expected, types)
-	assert.Len(t, types, 21)
+	assert.Len(t, types, 22)
 	seen := make(map[string]bool)
 	for _, typ := range types {
 		assert.NotEmpty(t, typ)

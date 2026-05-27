@@ -38,7 +38,7 @@ export function NodeDetailPage() {
   const [selectedSnapshot, setSelectedSnapshot] = useState<Snapshot | null>(null);
   const [targetPath, setTargetPath] = useState("");
   const [confirmed, setConfirmed] = useState(false);
-  const [expandedTaskId, setExpandedTaskId] = useState<number | null>(null);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [confirmBackupOpen, setConfirmBackupOpen] = useState(false);
 
   const { data: agent, isLoading: agentLoading } = useQuery({
