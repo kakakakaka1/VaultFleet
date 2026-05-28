@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { browseSnapshot } from "@/services/snapshots";
+import type { SnapshotFileEntry } from "@/types/snapshot";
 import { SnapshotTreeBrowser } from "./snapshot-tree-browser";
 
 vi.mock("@/services/snapshots", () => ({
@@ -32,15 +33,7 @@ describe("SnapshotTreeBrowser", () => {
   it("loads snapshot entries and selecting a directory reports the directory and descendants", async () => {
     const onSelectedPathsChange = vi.fn();
     const user = userEvent.setup();
-    vi.mocked(browseSnapshot).mockResolvedValue({
-      snapshot_id: "snap-1",
-      entries: [
-        { path: "/data", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
-        { path: "/data/docs", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
-        { path: "/data/docs/readme.md", type: "file", size: 2048, mtime: "2026-05-22T00:00:00Z" },
-        { path: "/data/photo.jpg", type: "file", size: 1024, mtime: "2026-05-22T00:00:00Z" },
-      ],
-    });
+    mockDataSnapshotTree();
 
     renderBrowser({ onSelectedPathsChange });
 
@@ -51,8 +44,11 @@ describe("SnapshotTreeBrowser", () => {
 
     await user.click(screen.getByRole("button", { name: "展开 /data" }));
 
-    expect(screen.getByText("docs")).toBeInTheDocument();
+    expect(await screen.findByText("docs")).toBeInTheDocument();
     expect(screen.getByText("photo.jpg")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "展开 /data/docs" }));
+    expect(await screen.findByText("readme.md")).toBeInTheDocument();
 
     const dataRow = screen.getByText("data").closest("[data-snapshot-tree-row]");
     expect(dataRow).not.toBeNull();
@@ -92,15 +88,7 @@ describe("SnapshotTreeBrowser", () => {
 
   it("checks a parent directory when all descendants are selected even if the parent path is not", async () => {
     const user = userEvent.setup();
-    vi.mocked(browseSnapshot).mockResolvedValue({
-      snapshot_id: "snap-1",
-      entries: [
-        { path: "/data", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
-        { path: "/data/docs", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
-        { path: "/data/docs/readme.md", type: "file", size: 2048, mtime: "2026-05-22T00:00:00Z" },
-        { path: "/data/photo.jpg", type: "file", size: 1024, mtime: "2026-05-22T00:00:00Z" },
-      ],
-    });
+    mockDataSnapshotTree();
 
     renderBrowser({
       selectedPaths: ["/data/docs", "/data/docs/readme.md", "/data/photo.jpg"],
@@ -108,6 +96,10 @@ describe("SnapshotTreeBrowser", () => {
 
     await user.click(screen.getByRole("button", { name: /浏览快照内容/ }));
     expect(await screen.findByText("data")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "展开 /data" }));
+    expect(await screen.findByText("docs")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "展开 /data/docs" }));
+    expect(await screen.findByText("readme.md")).toBeInTheDocument();
 
     const dataRow = screen.getByText("data").closest("[data-snapshot-tree-row]");
     expect(dataRow).not.toBeNull();
@@ -141,15 +133,7 @@ describe("SnapshotTreeBrowser", () => {
   it("removes selected ancestor directories when a descendant is unchecked", async () => {
     const onSelectedPathsChange = vi.fn();
     const user = userEvent.setup();
-    vi.mocked(browseSnapshot).mockResolvedValue({
-      snapshot_id: "snap-1",
-      entries: [
-        { path: "/data", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
-        { path: "/data/docs", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
-        { path: "/data/docs/readme.md", type: "file", size: 2048, mtime: "2026-05-22T00:00:00Z" },
-        { path: "/data/photo.jpg", type: "file", size: 1024, mtime: "2026-05-22T00:00:00Z" },
-      ],
-    });
+    mockDataSnapshotTree();
 
     renderBrowser({
       selectedPaths: ["/data", "/data/docs", "/data/docs/readme.md", "/data/photo.jpg"],
@@ -160,7 +144,7 @@ describe("SnapshotTreeBrowser", () => {
     expect(await screen.findByText("data")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "展开 /data" }));
-    const photoRow = screen.getByText("photo.jpg").closest("[data-snapshot-tree-row]");
+    const photoRow = (await screen.findByText("photo.jpg")).closest("[data-snapshot-tree-row]");
     expect(photoRow).not.toBeNull();
 
     await user.click(within(photoRow as HTMLElement).getByRole("checkbox", { name: "选择 /data/photo.jpg" }));
@@ -239,4 +223,24 @@ function rerenderBrowser(
       />
     </QueryClientProvider>,
   );
+}
+
+function mockDataSnapshotTree() {
+  const entriesByPath: Record<string, SnapshotFileEntry[]> = {
+    "": [
+      { path: "/data", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
+    ],
+    "/data": [
+      { path: "/data/docs", type: "dir", size: 0, mtime: "2026-05-22T00:00:00Z" },
+      { path: "/data/photo.jpg", type: "file", size: 1024, mtime: "2026-05-22T00:00:00Z" },
+    ],
+    "/data/docs": [
+      { path: "/data/docs/readme.md", type: "file", size: 2048, mtime: "2026-05-22T00:00:00Z" },
+    ],
+  };
+
+  vi.mocked(browseSnapshot).mockImplementation(async (_agentId, body) => ({
+    snapshot_id: body.snapshot_id,
+    entries: entriesByPath[body.path ?? ""] ?? [],
+  }));
 }

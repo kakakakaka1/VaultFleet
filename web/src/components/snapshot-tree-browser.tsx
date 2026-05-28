@@ -67,16 +67,7 @@ export function SnapshotTreeBrowser({
       if (resp.error) {
         throw new Error(resp.error);
       }
-      const entries = resp.entries ?? [];
-      return sortEntries(entries).map((e) => ({
-        name: getPathName(e.path),
-        path: e.path,
-        type: e.type,
-        size: e.size,
-        mtime: e.mtime,
-        children: e.type === "dir" ? null : [],
-        loading: false,
-      }));
+      return buildTreeNodes(resp.entries ?? [], path);
     },
     [agentId, snapshotId],
   );
@@ -195,14 +186,41 @@ export function SnapshotTreeBrowser({
   const handleCheck = useCallback(
     (node: TreeNode, checked: boolean) => {
       if (checked) {
-        if (!selectedPaths.includes(node.path)) {
-          onSelectedPathsChange([...selectedPaths, node.path]);
+        const next = [...selectedPaths];
+        for (const path of collectLoadedPaths(node)) {
+          if (!next.includes(path)) {
+            next.push(path);
+          }
         }
-      } else {
-        onSelectedPathsChange(selectedPaths.filter((p) => p !== node.path));
+        onSelectedPathsChange(next);
+        return;
       }
+
+      const selectedAncestors = selectedPaths.filter((path) =>
+        isAncestorPath(path, node.path),
+      );
+      const next = selectedPaths.filter((path) => {
+        if (isSameOrDescendantPath(path, node.path)) {
+          return false;
+        }
+        return !isAncestorPath(path, node.path);
+      });
+
+      for (const ancestorPath of selectedAncestors) {
+        const ancestor = findNode(rootNodes, ancestorPath);
+        if (!ancestor) {
+          continue;
+        }
+        for (const path of collectLoadedPathsExcluding(ancestor, node.path)) {
+          if (!next.includes(path)) {
+            next.push(path);
+          }
+        }
+      }
+
+      onSelectedPathsChange(next);
     },
-    [onSelectedPathsChange, selectedPaths],
+    [onSelectedPathsChange, rootNodes, selectedPaths],
   );
 
   if (!expanded) {
@@ -309,7 +327,7 @@ function TreeNodeRow({
 }) {
   const isDir = node.type === "dir";
   const isExpanded = expandedNodes.has(node.path);
-  const checked = selectedPathSet.has(node.path);
+  const checked = isNodeChecked(node, selectedPathSet);
 
   return (
     <>
@@ -427,9 +445,131 @@ function sortEntries(entries: SnapshotFileEntry[]): SnapshotFileEntry[] {
   });
 }
 
+function buildTreeNodes(entries: SnapshotFileEntry[], parentPath?: string): TreeNode[] {
+  const nodeMap = new Map<string, TreeNode>();
+  const roots: TreeNode[] = [];
+  const scopedEntries = sortEntries(entries).filter((entry) =>
+    isInBrowseScope(entry.path, parentPath),
+  );
+
+  for (const entry of scopedEntries) {
+    nodeMap.set(entry.path, {
+      name: getPathName(entry.path),
+      path: entry.path,
+      type: entry.type,
+      size: entry.size,
+      mtime: entry.mtime,
+      children: entry.type === "dir" ? null : [],
+      loading: false,
+    });
+  }
+
+  for (const entry of scopedEntries) {
+    const node = nodeMap.get(entry.path);
+    if (!node) {
+      continue;
+    }
+
+    const parent = nodeMap.get(getParentPath(entry.path) ?? "");
+    if (parent) {
+      parent.children = [...(parent.children ?? []), node];
+      continue;
+    }
+
+    roots.push(node);
+  }
+
+  return sortTreeNodes(roots);
+}
+
+function sortTreeNodes(nodes: TreeNode[]): TreeNode[] {
+  return [...nodes]
+    .sort((a, b) => {
+      if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+      return a.path.localeCompare(b.path);
+    })
+    .map((node) => ({
+      ...node,
+      children: node.children ? sortTreeNodes(node.children) : node.children,
+    }));
+}
+
+function isInBrowseScope(path: string, parentPath?: string): boolean {
+  if (!parentPath) {
+    return path !== "/";
+  }
+  return isDescendantPath(path, parentPath);
+}
+
 function getPathName(path: string): string {
   const parts = path.split("/").filter(Boolean);
   return parts[parts.length - 1] || path;
+}
+
+function getParentPath(path: string): string | null {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length <= 1) {
+    return null;
+  }
+  const prefix = path.startsWith("/") ? "/" : "";
+  return `${prefix}${parts.slice(0, -1).join("/")}`;
+}
+
+function collectLoadedPaths(node: TreeNode): string[] {
+  return [
+    node.path,
+    ...(node.children?.flatMap((child) => collectLoadedPaths(child)) ?? []),
+  ];
+}
+
+function collectLoadedPathsExcluding(node: TreeNode, excludedPath: string): string[] {
+  if (isSameOrDescendantPath(node.path, excludedPath)) {
+    return [];
+  }
+  if (isAncestorPath(node.path, excludedPath)) {
+    return node.children?.flatMap((child) =>
+      collectLoadedPathsExcluding(child, excludedPath),
+    ) ?? [];
+  }
+  return collectLoadedPaths(node);
+}
+
+function isNodeChecked(node: TreeNode, selectedPathSet: Set<string>): boolean {
+  if (selectedPathSet.has(node.path) || hasSelectedAncestor(node.path, selectedPathSet)) {
+    return true;
+  }
+  if (node.type === "dir" && node.children && node.children.length > 0) {
+    return node.children.every((child) => isNodeChecked(child, selectedPathSet));
+  }
+  return false;
+}
+
+function hasSelectedAncestor(path: string, selectedPathSet: Set<string>): boolean {
+  for (const selectedPath of selectedPathSet) {
+    if (isAncestorPath(selectedPath, path)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isSameOrDescendantPath(path: string, parentPath: string): boolean {
+  return path === parentPath || isDescendantPath(path, parentPath);
+}
+
+function isDescendantPath(path: string, parentPath: string): boolean {
+  if (parentPath === "/") {
+    return path !== "/" && path.startsWith("/");
+  }
+  const prefix = parentPath.endsWith("/") ? parentPath : `${parentPath}/`;
+  return path.startsWith(prefix);
+}
+
+function isAncestorPath(candidate: string, path: string): boolean {
+  if (candidate === path) {
+    return false;
+  }
+  return isDescendantPath(path, candidate);
 }
 
 function findNode(nodes: TreeNode[], path: string): TreeNode | null {
