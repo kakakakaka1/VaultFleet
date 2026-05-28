@@ -903,6 +903,119 @@ func TestHandleBackupNowStartsAsyncAndDoesNotBlockHandle(t *testing.T) {
 	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
 }
 
+func TestRunBackupForPolicyWarmsSnapshotCacheAndPrunesForgottenSnapshots(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	policyPayload := &protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{RepoPath: "repo/agent-1"},
+	}
+	require.NoError(t, store.SavePolicy(policyPayload))
+
+	cache := newSnapshotCache(configDir)
+	require.NoError(t, cache.Put("snap-old", []executor.SnapshotFileEntry{{Path: "/old", Type: "dir"}}))
+	require.NoError(t, cache.Put("snap-dead", []executor.SnapshotFileEntry{{Path: "/dead", Type: "dir"}}))
+
+	var browseMu sync.Mutex
+	var browsedSnapshots []string
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(context.Context, executor.ExecutorConfig, executor.ProgressCallback) executor.TaskResult {
+			return executor.TaskResult{
+				Type:       "backup",
+				Status:     "success",
+				DurationMs: 25,
+				SnapshotID: "snap-new",
+				Snapshots: []executor.SnapshotInfo{
+					{ID: "snap-old"},
+					{ID: "snap-new"},
+				},
+			}
+		},
+		SnapshotBrowseRunner: func(_ context.Context, _ executor.ExecutorConfig, snapshotID string, path string) ([]executor.SnapshotFileEntry, error) {
+			browseMu.Lock()
+			browsedSnapshots = append(browsedSnapshots, snapshotID+":"+path)
+			browseMu.Unlock()
+			if snapshotID != "snap-new" {
+				return nil, errors.New("unexpected browse for " + snapshotID)
+			}
+			return []executor.SnapshotFileEntry{{Path: "/new", Type: "dir"}}, nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	resultMsg := waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&resultMsg)
+	require.NoError(t, err)
+	assert.Equal(t, "success", result.Status)
+	assert.Equal(t, "snap-new", result.SnapshotID)
+
+	require.Eventually(t, func() bool {
+		return cache.Has("snap-new") && !cache.Has("snap-dead")
+	}, time.Second, 10*time.Millisecond)
+	assert.True(t, cache.Has("snap-old"))
+
+	cachedNew, ok, err := cache.Get("snap-new")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, []executor.SnapshotFileEntry{{Path: "/new", Type: "dir"}}, cachedNew)
+
+	browseMu.Lock()
+	assert.Equal(t, []string{"snap-new:"}, browsedSnapshots)
+	browseMu.Unlock()
+}
+
+func TestRunBackupForPolicyCacheWarmFailureKeepsSuccessResult(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{RepoPath: "repo/agent-1"},
+	}))
+
+	var browseCalls atomic.Int32
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(context.Context, executor.ExecutorConfig, executor.ProgressCallback) executor.TaskResult {
+			return executor.TaskResult{
+				Type:       "backup",
+				Status:     "success",
+				DurationMs: 25,
+				SnapshotID: "snap-new",
+				Snapshots:  []executor.SnapshotInfo{{ID: "snap-new"}},
+			}
+		},
+		SnapshotBrowseRunner: func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error) {
+			browseCalls.Add(1)
+			return nil, errors.New("ls failed")
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	resultMsg := waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&resultMsg)
+	require.NoError(t, err)
+	assert.Equal(t, "success", result.Status)
+	assert.Empty(t, result.ErrorLog)
+
+	require.Eventually(t, func() bool {
+		return browseCalls.Load() == 1
+	}, time.Second, 10*time.Millisecond)
+	assert.False(t, newSnapshotCache(configDir).Has("snap-new"))
+}
+
 func TestCancelTaskStopsRunningBackup(t *testing.T) {
 	store := policy.NewStore(t.TempDir())
 	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{

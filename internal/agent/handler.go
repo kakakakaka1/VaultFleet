@@ -536,7 +536,8 @@ func (h *Handler) runBackupForPolicy(ctx context.Context, messageID string, agen
 	}
 
 	startedAt := time.Now()
-	result := h.backupRunnerWithProgress(ctx, executorConfigForPolicy(h.configDir, policyPayload), h.backupProgressCallback(messageID, agentID))
+	cfg := executorConfigForPolicy(h.configDir, policyPayload)
+	result := h.backupRunnerWithProgress(ctx, cfg, h.backupProgressCallback(messageID, agentID))
 	if ctx.Err() == context.Canceled {
 		result.Status = "cancelled"
 		if result.ErrorLog == "" {
@@ -544,6 +545,46 @@ func (h *Handler) runBackupForPolicy(ctx context.Context, messageID string, agen
 		}
 	}
 	h.sendTaskResultWithID(messageID, result.ToProtocol(agentID, startedAt))
+
+	if result.Status == "success" && len(result.Snapshots) > 0 {
+		go h.warmSnapshotCache(context.Background(), cfg, result.Snapshots)
+	}
+}
+
+func (h *Handler) warmSnapshotCache(ctx context.Context, cfg executor.ExecutorConfig, snapshots []executor.SnapshotInfo) {
+	if h.snapshotCache == nil {
+		return
+	}
+
+	liveSnapshotIDs := make([]string, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.ID != "" {
+			liveSnapshotIDs = append(liveSnapshotIDs, snapshot.ID)
+		}
+	}
+	if err := h.snapshotCache.Sync(liveSnapshotIDs); err != nil {
+		log.Printf("sync snapshot cache failed: %v", err)
+	}
+
+	for _, snapshot := range snapshots {
+		if snapshot.ID == "" || h.snapshotCache.Has(snapshot.ID) {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		entries, err := h.snapshotBrowseRunner(ctx, cfg, snapshot.ID, "")
+		if err != nil {
+			log.Printf("warm snapshot cache %s failed: %v", snapshot.ID, err)
+			continue
+		}
+		if err := h.snapshotCache.Put(snapshot.ID, entries); err != nil {
+			log.Printf("write snapshot cache %s failed: %v", snapshot.ID, err)
+		}
+	}
 }
 
 func (h *Handler) backupProgressCallback(messageID string, agentID string) executor.ProgressCallback {
