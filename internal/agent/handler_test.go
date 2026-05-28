@@ -1475,9 +1475,8 @@ func TestHandleSnapshotBrowseInvokesRunnerAndSendsResponseWithSameID(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, "snap-1", payload.SnapshotID)
 	assert.Empty(t, payload.Error)
-	require.Len(t, payload.Entries, 2)
+	require.Len(t, payload.Entries, 1, "empty path should return only top-level entries")
 	assert.Equal(t, protocol.SnapshotFileEntry{Path: "/srv", Type: "dir", Size: 0, Mtime: "2026-05-22T08:00:00Z"}, payload.Entries[0])
-	assert.Equal(t, protocol.SnapshotFileEntry{Path: "/srv/app.db", Type: "file", Size: 4096, Mtime: "2026-05-22T08:01:00Z"}, payload.Entries[1])
 }
 
 func TestHandleSnapshotBrowseRunnerFailureSendsErrorPayload(t *testing.T) {
@@ -1580,6 +1579,72 @@ func TestHandleSnapshotBrowseResponseTooLargeSendsErrorPayload(t *testing.T) {
 	assert.Contains(t, payload.Error, "snapshot browse response too large")
 	assert.Nil(t, payload.Entries)
 	assert.Less(t, len(respMsg.Payload), maxSnapshotBrowseResponseBytes)
+}
+
+func TestHandleSnapshotBrowseWithPathFiltersDirectChildren(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{RepoPath: "repo/agent-1"},
+	}))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		SendFunc:    sent.send,
+		SnapshotBrowseRunner: func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error) {
+			return []executor.SnapshotFileEntry{
+				{Path: "/srv/app", Type: "dir", Size: 0},
+				{Path: "/srv/app/main.go", Type: "file", Size: 100},
+				{Path: "/srv/data.db", Type: "file", Size: 4096},
+			}, nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotBrowseReq, protocol.SnapshotBrowseReqPayload{
+		SnapshotID: "snap-1",
+		Path:       "/srv",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	respMsg := waitForMessageType(t, sent, protocol.TypeSnapshotBrowseResp, time.Second)
+	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&respMsg)
+	require.NoError(t, err)
+	assert.Empty(t, payload.Error)
+	require.Len(t, payload.Entries, 2, "should return only direct children of /srv")
+	assert.Equal(t, "/srv/app", payload.Entries[0].Path)
+	assert.Equal(t, "/srv/data.db", payload.Entries[1].Path)
+}
+
+func TestFilterTopLevelEntries(t *testing.T) {
+	entries := []executor.SnapshotFileEntry{
+		{Path: "/root", Type: "dir", Size: 0},
+		{Path: "/root/Docker", Type: "dir", Size: 0},
+		{Path: "/root/Docker/compose.yml", Type: "file", Size: 512},
+		{Path: "/etc", Type: "dir", Size: 0},
+		{Path: "/etc/nginx", Type: "dir", Size: 0},
+		{Path: "/etc/nginx/nginx.conf", Type: "file", Size: 256},
+	}
+
+	result := filterTopLevelEntries(entries)
+
+	require.Len(t, result, 2)
+	assert.Equal(t, "/root", result[0].Path)
+	assert.Equal(t, "/etc", result[1].Path)
+}
+
+func TestFilterTopLevelEntriesSkipsRootSlash(t *testing.T) {
+	entries := []executor.SnapshotFileEntry{
+		{Path: "/", Type: "dir", Size: 0},
+		{Path: "/home", Type: "dir", Size: 0},
+		{Path: "/home/user", Type: "dir", Size: 0},
+	}
+
+	result := filterTopLevelEntries(entries)
+
+	require.Len(t, result, 1)
+	assert.Equal(t, "/home", result[0].Path)
 }
 
 func TestHandlerDirBrowseReqSendsResponseWithSameID(t *testing.T) {

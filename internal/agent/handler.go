@@ -963,6 +963,8 @@ func (h *Handler) handleSnapshotBrowseReq(msg protocol.Message) {
 
 		if path != "" {
 			entries = filterDirectChildren(entries, path)
+		} else {
+			entries = filterTopLevelEntries(entries)
 		}
 
 		protoEntries := make([]protocol.SnapshotFileEntry, len(entries))
@@ -1033,6 +1035,18 @@ func filterDirectChildren(entries []executor.SnapshotFileEntry, parentPath strin
 		}
 		rest := e.Path[len(prefix):]
 		if rest == "" || strings.Contains(rest, "/") {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
+}
+
+func filterTopLevelEntries(entries []executor.SnapshotFileEntry) []executor.SnapshotFileEntry {
+	var result []executor.SnapshotFileEntry
+	for _, e := range entries {
+		path := strings.TrimPrefix(e.Path, "/")
+		if path == "" || strings.Contains(path, "/") {
 			continue
 		}
 		result = append(result, e)
