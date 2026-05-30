@@ -130,7 +130,7 @@ func NewHandler(config HandlerConfig) *Handler {
 		}
 		policyScheduler = defaultScheduler
 	}
-	return &Handler{
+	handler := &Handler{
 		policyStore:              config.PolicyStore,
 		send:                     config.SendFunc,
 		browse:                   browse,
@@ -149,6 +149,8 @@ func NewHandler(config HandlerConfig) *Handler {
 		updater:                  config.Updater,
 		tasks:                    newTaskManager(),
 	}
+	handler.restoreSavedPolicySchedule()
+	return handler
 }
 
 func (h *Handler) Handle(msg protocol.Message) {
@@ -175,6 +177,33 @@ func (h *Handler) Handle(msg protocol.Message) {
 		h.handleCancelTask(msg)
 	case protocol.TypeUpdateAgent:
 		h.handleUpdateAgent(msg)
+	}
+}
+
+func (h *Handler) restoreSavedPolicySchedule() {
+	if h.policyStore == nil || h.scheduler == nil {
+		return
+	}
+	savedPolicy, err := h.policyStore.LoadPolicy()
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("load saved policy schedule failed: %v", err)
+		}
+		return
+	}
+	if savedPolicy.Schedule == "" {
+		h.scheduler.RemoveJob(savedPolicy.AgentID)
+		return
+	}
+	if err := h.scheduler.UpdateSchedule(savedPolicy.AgentID, savedPolicy.Schedule, func() {
+		startErr := h.tasks.Start("", taskTypeBackup, func(ctx context.Context) {
+			h.runBackupForPolicy(ctx, "", savedPolicy.AgentID, savedPolicy)
+		})
+		if startErr != nil {
+			log.Printf("scheduled backup skipped: %v", startErr)
+		}
+	}); err != nil {
+		log.Printf("restore saved policy schedule failed: %v", err)
 	}
 }
 

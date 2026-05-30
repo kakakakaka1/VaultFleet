@@ -103,6 +103,42 @@ func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testin
 	}, runnerConfig)
 }
 
+func TestNewHandlerRestoresSavedPolicySchedule(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RepoPath: "bucket/agent-1",
+		},
+		BackupDirs: []string{"/srv"},
+		Schedule:   "0 2 * * *",
+	}))
+
+	scheduler := &recordingScheduler{}
+	sent := &sentMessages{}
+	var runnerCalls atomic.Int32
+	NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		Scheduler:   scheduler,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(_ context.Context, cfg executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
+			runnerCalls.Add(1)
+			assert.Equal(t, []string{"/srv"}, cfg.BackupDirs)
+			assert.Equal(t, "bucket/agent-1", cfg.RepoPath)
+			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 10, SnapshotID: "snap-1"}
+		},
+	})
+
+	require.Len(t, scheduler.updates, 1)
+	assert.Equal(t, "agent-1", scheduler.updates[0].agentID)
+	assert.Equal(t, "0 2 * * *", scheduler.updates[0].schedule)
+
+	scheduler.updates[0].fn()
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+	assert.Equal(t, int32(1), runnerCalls.Load())
+}
+
 func TestHandlePolicyPushPassesRcloneArgs(t *testing.T) {
 	store := policy.NewStore(t.TempDir())
 	configDir := t.TempDir()
@@ -500,7 +536,7 @@ func TestHandlePolicyPushReplaceFailurePreservesExistingPolicyAndConfig(t *testi
 	require.NoError(t, err)
 	assert.False(t, ack.Success)
 	assert.NotEmpty(t, ack.Error)
-	assert.Empty(t, scheduler.updates)
+	assert.Len(t, scheduler.updates, 1)
 
 	stored, err := store.LoadPolicy()
 	require.NoError(t, err)
